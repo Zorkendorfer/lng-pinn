@@ -1,7 +1,7 @@
 """Economic dispatch optimizer using PINN surrogate as cost model.
 
 Approach: Path A (plan §4) — discretise send-out flow into levels,
-evaluate PINN cost per level per hour in preprocessing, solve MILP with Pyomo + CBC.
+evaluate PINN cost per level per hour in preprocessing, solve MILP with SciPy/HiGHS.
 """
 
 from __future__ import annotations
@@ -10,8 +10,9 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-import pyomo.environ as pyo
 import torch
+from scipy.optimize import Bounds, LinearConstraint, milp
+from scipy.sparse import lil_matrix
 
 from lng_pinn.pinn import PINNMLP, Scaler
 
@@ -85,41 +86,57 @@ def optimize(
     flow_levels = np.linspace(M_DOT_MIN, M_DOT_MAX, N_FLOW_LEVELS)
     cost_table = _pinn_cost_table(horizon_df, model, scaler, flow_levels)
 
-    m = pyo.ConcreteModel()
-    m.T = pyo.RangeSet(0, T - 1)
-    m.L = pyo.RangeSet(0, N_FLOW_LEVELS - 1)
+    if not np.isfinite(cost_table).all():
+        raise ValueError("PINN produced non-finite dispatch costs")
 
-    m.x = pyo.Var(m.T, m.L, domain=pyo.Binary)
-    m.inv = pyo.Var(pyo.RangeSet(0, T), domain=pyo.NonNegativeReals, bounds=(TANK_MIN, TANK_MAX))
+    n_vars = T * N_FLOW_LEVELS
+    flow_kg_h = flow_levels * 3600.0
 
-    # One level per hour
-    m.one_level = pyo.Constraint(m.T, rule=lambda m, t: sum(m.x[t, lv] for lv in m.L) == 1)
+    n_constraints = T + 1 + T
+    constraint = lil_matrix((n_constraints, n_vars), dtype=float)
+    lb = np.full(n_constraints, -np.inf)
+    ub = np.full(n_constraints, np.inf)
 
-    # Inventory dynamics (dt = 1 h = 3600 s)
-    def inv_dynamics(m: pyo.ConcreteModel, t: int) -> pyo.Expression:
-        flow_kg_h = sum(m.x[t, lv] * flow_levels[lv] * 3600.0 for lv in m.L)
-        return m.inv[t + 1] == m.inv[t] - flow_kg_h / TANK_CAP
+    # One level per hour.
+    for t in range(T):
+        row = t
+        start = t * N_FLOW_LEVELS
+        constraint[row, start : start + N_FLOW_LEVELS] = 1.0
+        lb[row] = 1.0
+        ub[row] = 1.0
 
-    m.inv_dyn = pyo.Constraint(m.T, rule=inv_dynamics)
-    m.inv[0].fix(inv0)
+    # Demand over the full horizon.
+    demand_row = T
+    for t in range(T):
+        start = t * N_FLOW_LEVELS
+        constraint[demand_row, start : start + N_FLOW_LEVELS] = flow_kg_h
+    lb[demand_row] = demand_kg
 
-    # Demand constraint
-    m.demand = pyo.Constraint(
-        expr=sum(sum(m.x[t, lv] * flow_levels[lv] * 3600.0 for lv in m.L) for t in m.T) >= demand_kg
+    # Inventory bounds after each hour, with inv[t] = inv0 - cumulative_flow / TANK_CAP.
+    min_cumulative = (inv0 - TANK_MAX) * TANK_CAP
+    max_cumulative = (inv0 - TANK_MIN) * TANK_CAP
+    for t in range(T):
+        row = T + 1 + t
+        for prev_t in range(t + 1):
+            start = prev_t * N_FLOW_LEVELS
+            constraint[row, start : start + N_FLOW_LEVELS] = flow_kg_h
+        lb[row] = min_cumulative
+        ub[row] = max_cumulative
+
+    result = milp(
+        c=cost_table.reshape(n_vars),
+        integrality=np.ones(n_vars),
+        bounds=Bounds(0.0, 1.0),
+        constraints=LinearConstraint(constraint.tocsr(), lb, ub),
     )
+    if not result.success:
+        raise RuntimeError(f"Dispatch optimization failed: {result.message}")
 
-    # Objective
-    m.obj = pyo.Objective(
-        expr=sum(cost_table[t, lv] * m.x[t, lv] for t in m.T for lv in m.L),
-        sense=pyo.minimize,
-    )
-
-    solver = pyo.SolverFactory("cbc")
-    solver.solve(m, tee=False)
-
-    m_dot_out = np.array([sum(pyo.value(m.x[t, lv]) * flow_levels[lv] for lv in m.L) for t in m.T])
-    cost_out = np.array([sum(cost_table[t, lv] * pyo.value(m.x[t, lv]) for lv in m.L) for t in m.T])
-    inv_out = np.array([pyo.value(m.inv[t]) for t in range(T + 1)])
+    x = result.x.reshape(T, N_FLOW_LEVELS)
+    m_dot_out = x @ flow_levels
+    cost_out = (cost_table * x).sum(axis=1)
+    cumulative_flow = np.concatenate(([0.0], np.cumsum(m_dot_out * 3600.0)))
+    inv_out = inv0 - cumulative_flow / TANK_CAP
 
     return Schedule(
         m_dot=m_dot_out,

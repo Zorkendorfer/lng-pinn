@@ -25,7 +25,10 @@ def _token() -> str:
 
 
 def pull_da_prices(start: str, end: str, zone: str = ZONE) -> pd.DataFrame:
-    """Pull day-ahead prices from ENTSO-E and cache to parquet.
+    """Pull day-ahead prices from ENTSO-E and cache to parquet (year-by-year).
+
+    Iterates over calendar years so each yearly file matches what load_da_prices
+    expects. Already-cached years are skipped.
 
     Args:
         start: ISO date string, e.g. "2021-01-01".
@@ -35,21 +38,36 @@ def pull_da_prices(start: str, end: str, zone: str = ZONE) -> pd.DataFrame:
     Returns:
         DataFrame with DatetimeTZDtype index (UTC) and column "price_eur_mwh".
     """
-    cache_path = RAW_DIR / f"da_prices_{zone}_{start}_{end}.parquet"
-    if cache_path.exists():
-        return pd.read_parquet(cache_path)
-
-    client = EntsoePandasClient(api_key=_token())
-    ts_start = pd.Timestamp(start, tz="UTC")
-    ts_end = pd.Timestamp(end, tz="UTC")
-
-    series = client.query_day_ahead_prices(zone, start=ts_start, end=ts_end)
-    df = series.to_frame(name="price_eur_mwh")
-    df.index.name = "utc_time"
-
+    start_year = pd.Timestamp(start).year
+    end_year = pd.Timestamp(end).year
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(cache_path)
-    return df
+
+    client: EntsoePandasClient | None = None
+    frames = []
+    for year in range(start_year, end_year):
+        y_start = f"{year}-01-01"
+        y_end = f"{year + 1}-01-01"
+        cache_path = RAW_DIR / f"da_prices_{zone}_{y_start}_{y_end}.parquet"
+        if cache_path.exists():
+            frames.append(pd.read_parquet(cache_path))
+            continue
+
+        if client is None:
+            client = EntsoePandasClient(api_key=_token())
+
+        series = client.query_day_ahead_prices(
+            zone,
+            start=pd.Timestamp(y_start, tz="UTC"),
+            end=pd.Timestamp(y_end, tz="UTC"),
+        )
+        df = series.to_frame(name="price_eur_mwh")
+        df.index.name = "utc_time"
+        df.to_parquet(cache_path)
+        frames.append(df)
+
+    result = pd.concat(frames).sort_index()
+    result = result[~result.index.duplicated(keep="first")]
+    return result
 
 
 def load_da_prices(start: str, end: str, zone: str = ZONE) -> pd.DataFrame:

@@ -31,15 +31,7 @@ cp .env.example .env   # then edit .env
 
 PyTorch will automatically use the **MPS backend** on M-series chips — no extra steps needed.
 
-The dispatch optimiser requires the **CBC solver**. Install it via Homebrew:
-
-```bash
-brew install cbc
-```
-
-Without CBC, `scripts/04_run_dispatch.py` will fail. (On Linux, install via
-`apt install coinor-cbc`; on Windows, CBC is bundled with some Pyomo installations —
-or use `pip install cylp`.)
+The dispatch optimiser uses SciPy's HiGHS MILP backend, so no separate solver install is needed.
 
 ## Reproduce
 

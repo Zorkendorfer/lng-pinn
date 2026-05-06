@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch import Tensor
+from tqdm import tqdm
 
 RESULTS_DIR = Path("results/models")
 
@@ -29,6 +30,14 @@ class Scaler(NamedTuple):
     x_std: Tensor
     y_mean: Tensor
     y_std: Tensor
+
+    def to(self, device: torch.device | str) -> "Scaler":
+        return Scaler(
+            self.x_mean.to(device),
+            self.x_std.to(device),
+            self.y_mean.to(device),
+            self.y_std.to(device),
+        )
 
     def scale_x(self, x: Tensor) -> Tensor:
         return (x - self.x_mean) / self.x_std
@@ -99,11 +108,13 @@ def train(
     device = _device()
     model = PINNMLP().to(device)
     X_train, y_train, X_col = X_train.to(device), y_train.to(device), X_col.to(device)
+    scaler = scaler.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_steps, eta_min=1e-5)
 
-    for step in range(n_steps):
+    pbar = tqdm(range(n_steps), desc="Training PINN", unit="step")
+    for step in pbar:
         idx_d = torch.randint(len(X_train), (batch_size,), device=device)
         idx_c = torch.randint(len(X_col), (batch_size,), device=device)
 
@@ -122,11 +133,8 @@ def train(
         optimizer.step()
         scheduler.step()
 
-        if step % 5_000 == 0:
-            print(
-                f"step {step:6d}  loss_data={loss_data.item():.4e}  "
-                f"loss_energy={loss_energy.item():.4e}"
-            )
+        if step % 500 == 0:
+            pbar.set_postfix(data=f"{loss_data.item():.3e}", phys=f"{loss_energy.item():.3e}")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     checkpoint = {"model_state": model.state_dict(), "scaler": scaler}
@@ -135,7 +143,8 @@ def train(
 
 
 def load(path: str | Path = RESULTS_DIR / "pinn_v1.pt") -> tuple[PINNMLP, Scaler]:
-    checkpoint: dict[str, Any] = torch.load(path, map_location="cpu")
+    with torch.serialization.safe_globals([Scaler]):
+        checkpoint: dict[str, Any] = torch.load(path, map_location="cpu")
     model = PINNMLP()
     model.load_state_dict(checkpoint["model_state"])
     model.eval()

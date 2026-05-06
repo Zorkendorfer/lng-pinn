@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.stats.qmc import LatinHypercube
+from tqdm import tqdm
 
 from lng_pinn.composition import build_composition_series
 from lng_pinn.market import load_da_prices, pull_weather
@@ -43,12 +44,16 @@ def _sample_compositions(lhs_cols: np.ndarray) -> np.ndarray:
     return np.column_stack([raw, n2])
 
 
-def _simulate_one(args: tuple[Any, ...]) -> dict[str, float]:
+def _simulate_one(args: tuple[Any, ...]) -> dict[str, float] | None:
     """Top-level function so it can be pickled by ProcessPoolExecutor."""
     from lng_pinn.plant import simulate  # imported inside worker to avoid pickling issues
 
     x, m_dot, T_amb, T_sw = args
-    out = simulate(x, float(m_dot), float(T_amb), float(T_sw))
+    try:
+        out = simulate(x, float(m_dot), float(T_amb), float(T_sw))
+    except ValueError:
+        # CoolProp can't find a density solution (two-phase or near-critical region)
+        return None
     return {
         "CH4": x[0],
         "C2H6": x[1],
@@ -89,8 +94,20 @@ def build_training_set(
     args = [(tuple(compositions[i]), m_dot[i], T_amb[i], T_sw[i]) for i in range(N)]
 
     n_workers = workers or max(1, (os.cpu_count() or 1))
+    chunksize = max(N // (n_workers * 4), 1)
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        records = list(executor.map(_simulate_one, args, chunksize=50))
+        raw_iter = executor.map(_simulate_one, args, chunksize=chunksize)
+        raw = list(tqdm(raw_iter, total=N, desc="Simulating", unit="pts"))
+
+    records = [r for r in raw if r is not None]
+    n_skipped = N - len(records)
+    if n_skipped:
+        import warnings
+        warnings.warn(
+            f"Skipped {n_skipped}/{N} ({100*n_skipped/N:.1f}%) points where CoolProp "
+            "found no density solution (two-phase or near-critical region).",
+            stacklevel=2,
+        )
 
     df = pd.DataFrame(records)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)

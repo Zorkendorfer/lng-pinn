@@ -14,7 +14,9 @@
       "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; .venv\\\\Scripts\\\\pytest tests/test_thermo.py tests/test_plant.py -v 2>&1)",
       "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; .venv\\\\Scripts\\\\ruff check src/ scripts/ tests/ 2>&1)",
       "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; .venv\\\\Scripts\\\\mypy src/lng_pinn/pinn.py src/lng_pinn/dispatch.py --ignore-missing-imports 2>&1)",
-      "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; .venv\\\\Scripts\\\\mypy src/ scripts/ tests/ --ignore-missing-imports 2>&1)"
+      "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; .venv\\\\Scripts\\\\mypy src/ scripts/ tests/ --ignore-missing-imports 2>&1)",
+      "Bash(uv run *)",
+      "Bash(uv sync *)"
     ]
   }
 }

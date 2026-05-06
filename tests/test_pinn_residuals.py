@@ -8,9 +8,16 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from lng_pinn.pinn import RESULTS_DIR, energy_balance_residual, load
+from lng_pinn.pinn import RESULTS_DIR, Scaler, energy_balance_residual, load
 
 CHECKPOINT = RESULTS_DIR / "pinn_v1.pt"
+
+
+def test_scaler_to_moves_all_tensors() -> None:
+    scaler = Scaler(*(torch.ones(2) for _ in range(4)))
+    moved = scaler.to("cpu")
+
+    assert all(tensor.device.type == "cpu" for tensor in moved)
 
 
 @pytest.mark.skipif(not CHECKPOINT.exists(), reason="No trained checkpoint found")

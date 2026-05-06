@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -37,8 +38,10 @@ def main() -> None:
     H = args.horizon_days * 24
     step = H  # non-overlapping rolling windows
 
+    n_windows = (len(ts) - H) // step
     aware_records, blind_records = [], []
-    for start in range(0, len(ts) - H, step):
+    starts = range(0, len(ts) - H, step)
+    for start in tqdm(starts, total=n_windows, desc="Dispatch windows", unit="wk"):
         window = ts.iloc[start : start + H]
         demand_kg = M_DOT_MAX * 0.6 * H * 3600  # 60% utilisation target
 

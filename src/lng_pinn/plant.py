@@ -59,55 +59,49 @@ def simulate(
 
     # --- Inlet state (saturated liquid) ---
     state.update(CP.PT_INPUTS, P_IN, T_IN)
-    h_in = state.hmolar()  # J/mol
-    rho_in = state.rhomass()  # kg/m³
+    h_in = state.hmolar()    # J/mol
+    s_in = state.smolar()    # J/(mol·K)
+    rho_in = state.rhomass() # kg/m³
     mw = state.molar_mass()  # kg/mol
 
     # --- Pump: isentropic work, corrected for efficiency ---
     # Approximation: liquid is incompressible, v ≈ 1/rho_in
-    v_liq = 1.0 / rho_in  # m³/kg
-    w_pump_is = v_liq * (P_out - P_IN)  # J/kg (isentropic)
-    w_pump = w_pump_is / ETA_PUMP  # J/kg (actual)
+    v_liq = 1.0 / rho_in                    # m³/kg
+    w_pump_is = v_liq * (P_out - P_IN)      # J/kg (isentropic)
+    w_pump = w_pump_is / ETA_PUMP           # J/kg (actual)
+    h_after_pump = h_in + w_pump * mw       # J/mol
 
-    # Enthalpy after pump
-    h_after_pump = h_in + w_pump * mw  # J/mol (approximate; liquid enthalpy rise)
-
-    # --- ORV: vaporise and heat to near send-out T using seawater ---
+    # --- Target state at send-out conditions ---
     state.update(CP.PT_INPUTS, P_out, T_SENDOUT)
-    h_out_target = state.hmolar()  # J/mol — target enthalpy at T_sendout, P_out
+    h_out_target = state.hmolar()  # J/mol
 
-    # Trim heater picks up any shortfall (or is zero if ORV overdoes it)
-    # For simplicity, assume ORV heats exactly to T_sw - 3 K (approach temperature)
+    # --- ORV outlet: seawater approach temperature ---
     T_orv_out = min(T_sw - 3.0, T_SENDOUT)
     state.update(CP.PT_INPUTS, P_out, T_orv_out)
-    h_orv_out = state.hmolar()  # J/mol
+    h_orv_out = state.hmolar()   # J/mol
+    s_orv_out = state.smolar()   # J/(mol·K)
+    cp_orv = state.cpmass()      # J/(kg·K)
 
     q_orv_actual = max(0.0, h_orv_out - h_after_pump)  # J/mol
-    q_sw_kg = q_orv_actual / mw  # J/kg
+    q_sw_kg = q_orv_actual / mw                         # J/kg
 
     # Trim heater
     q_trim = max(0.0, h_out_target - h_orv_out)  # J/mol
-    w_trim = (q_trim / mw) / ETA_TRIM_HEATER  # J/kg
+    w_trim = (q_trim / mw) / ETA_TRIM_HEATER      # J/kg
 
-    # --- Actual outlet ---
+    # --- Actual outlet temperature ---
     T_out = (
         T_SENDOUT
         if T_orv_out >= T_SENDOUT
-        else T_orv_out + (q_trim / mw) / (state.cpmass() or 2200.0)
+        else T_orv_out + (q_trim / mw) / (cp_orv or 2200.0)
     )
 
     # --- Exergy destruction in ORV ---
     # Exergy supplied by seawater: Q_sw * (1 - T0/T_sw)
     # Exergy gained by stream: (h_out - h_in) - T0*(s_out - s_in)  [per kg]
-    T0 = 273.15  # reference dead-state temperature (0 °C)
+    T0 = 273.15
     exergy_in_sw = q_sw_kg * (1.0 - T0 / T_sw) if T_sw > T0 else 0.0
-    state.update(CP.PT_INPUTS, P_IN, T_IN)
-    s_in_mol = state.smolar()
-    h_in_mol = state.hmolar()
-    state.update(CP.PT_INPUTS, P_out, T_orv_out)
-    s_out_mol = state.smolar()
-    h_out_mol = state.hmolar()
-    exergy_stream_gain = (h_out_mol - h_in_mol) / mw - T0 * (s_out_mol - s_in_mol) / mw
+    exergy_stream_gain = (h_orv_out - h_in) / mw - T0 * (s_orv_out - s_in) / mw
     exergy_destruction = max(0.0, exergy_in_sw - exergy_stream_gain)
 
     J_TO_KWH = 1.0 / 3_600_000.0
