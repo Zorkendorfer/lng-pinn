@@ -3,14 +3,13 @@
 Known limitations of HEOS backend:
 - Reduced accuracy for heavy hydrocarbons (nC4, iC4) near critical point.
 - Mixture interaction parameters from NIST; adequate for natural gas compositions.
-- AbstractState objects are expensive to construct; cache by composition hash.
+- AbstractState construction is expensive (~0.1s); use a singleton and call
+  set_mole_fractions() before each update rather than constructing per composition.
 """
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
 import CoolProp.CoolProp as CP
@@ -18,6 +17,25 @@ import CoolProp.CoolProp as CP
 # Species in canonical order; mole fractions must sum to 1.
 SPECIES = ("Methane", "Ethane", "Propane", "n-Butane", "IsoButane", "Nitrogen")
 SPECIES_KEYS = ("CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2")
+
+_STATE: Any = None
+
+
+def _fluid_str() -> str:
+    return "&".join(SPECIES)
+
+
+def get_state(x: tuple[float, ...]) -> Any:
+    """Return the singleton AbstractState configured for composition x.
+
+    The same C++ object is reused across calls; mole fractions are reset
+    each time. Not thread-safe — adequate for single-threaded simulation.
+    """
+    global _STATE
+    if _STATE is None:
+        _STATE = CP.AbstractState("HEOS", _fluid_str())
+    _STATE.set_mole_fractions(list(x))
+    return _STATE
 
 
 @dataclass(frozen=True)
@@ -27,24 +45,6 @@ class MixtureState:
     h: float  # J/mol  (molar enthalpy)
     s: float  # J/(mol·K)
     rho: float  # kg/m³
-
-
-def _composition_key(x: tuple[float, ...]) -> str:
-    return hashlib.md5(str(x).encode()).hexdigest()
-
-
-@lru_cache(maxsize=512)
-def _get_state(composition_key: str, x: tuple[float, ...]) -> Any:
-    fluid_str = "&".join(SPECIES)
-    state = CP.AbstractState("HEOS", fluid_str)
-    state.set_mole_fractions(list(x))
-    return state
-
-
-def get_state(x: tuple[float, ...]) -> Any:
-    """Return a cached AbstractState for the given mole-fraction tuple."""
-    key = _composition_key(x)
-    return _get_state(key, x)
 
 
 def mixture_state(x: tuple[float, ...], T: float, P: float) -> MixtureState:

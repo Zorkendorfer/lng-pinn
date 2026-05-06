@@ -97,16 +97,17 @@ def simulate(
     )
 
     # --- Exergy destruction in ORV ---
-    # Exergy of heat transferred from seawater at T_sw to stream: Q*(1 - T0/T_sw)
-    T0 = 273.15  # reference (0 °C)
+    # Exergy supplied by seawater: Q_sw * (1 - T0/T_sw)
+    # Exergy gained by stream: (h_out - h_in) - T0*(s_out - s_in)  [per kg]
+    T0 = 273.15  # reference dead-state temperature (0 °C)
     exergy_in_sw = q_sw_kg * (1.0 - T0 / T_sw) if T_sw > T0 else 0.0
-    state.update(CP.PT_INPUTS, P_out, T_orv_out)
-    h_orv_out_check = state.hmolar() / mw
     state.update(CP.PT_INPUTS, P_IN, T_IN)
-    h_in_check = state.hmolar() / mw
-    exergy_stream_gain = (h_orv_out_check - h_in_check) - T0 * (
-        state.smolar() / mw  # approximation; proper calculation needs outlet s
-    )
+    s_in_mol = state.smolar()
+    h_in_mol = state.hmolar()
+    state.update(CP.PT_INPUTS, P_out, T_orv_out)
+    s_out_mol = state.smolar()
+    h_out_mol = state.hmolar()
+    exergy_stream_gain = (h_out_mol - h_in_mol) / mw - T0 * (s_out_mol - s_in_mol) / mw
     exergy_destruction = max(0.0, exergy_in_sw - exergy_stream_gain)
 
     J_TO_KWH = 1.0 / 3_600_000.0
