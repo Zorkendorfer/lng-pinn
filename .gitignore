@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.uv/
+
+# Data (pulled by scripts, do not commit)
+data/raw/
+data/processed/
+
+# Notebooks (except final results)
+notebooks/exploration/
+
+# Secrets
+.env
+
+# Results (large; commit only via LFS or Zenodo link)
+results/models/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TensorBoard / wandb
+runs/
+wandb/

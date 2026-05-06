@@ -1,0 +1,117 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{siunitx}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{amsmath}
+\usepackage{natbib}
+
+\title{Composition-aware physics-informed surrogate for FSRU regasification\\
+       dispatch under day-ahead electricity prices}
+\author{Jonas Kalnius}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+% Write last. Target 150 words. Fill in X, Y, Z from results.
+We present a physics-informed neural network (PINN) surrogate of FSRU
+regasification that treats LNG composition as a dynamic state, and couple it
+to day-ahead electricity price signals to compute economically optimal
+send-out schedules. Using the Independence FSRU in Klaip\polhk eda as a
+reference and Lithuanian (LT) ENTSO-E day-ahead prices, we show that
+composition-aware dispatch yields \textbf{X\%} cost reduction over
+composition-blind baselines across a multi-year backtest, and that the PINN
+surrogate matches a CoolProp reference simulator to within \textbf{Y\%} on
+energy balance residuals while running \textbf{$\sim$Z$\times$} faster.
+\end{abstract}
+
+% =========================================================
+\section{Introduction}
+\label{sec:intro}
+% ~1 page. Draw from refs.bib annotations. Fill in during Phase 6.
+
+% =========================================================
+\section{System and problem statement}
+\label{sec:system}
+
+\subsection{FSRU regasification model}
+% Equipment topology: cryogenic pump → ORV → trim heater.
+% Reference: Independence FSRU, Klaipėda (55.71°N, 21.13°E).
+
+\subsection{Economic dispatch formulation}
+% Decision variable: send-out flow m_dot_t at each hour t.
+% Objective: minimise sum_t price_t * W_total(m_dot_t, x_t, T_amb_t, T_sw_t).
+% Constraints: cumulative demand, flow limits, inventory bounds.
+
+% =========================================================
+\section{Methods}
+\label{sec:methods}
+
+\subsection{Ground-truth simulator}
+% CoolProp HEOS backend; cite \citet{bell2014pure}.
+
+\subsection{PINN architecture and training}
+% MLP: 5 hidden layers, 128 units, tanh. Loss:
+\begin{equation}
+  \mathcal{L} = \lambda_d \mathcal{L}_{\text{data}}
+              + \lambda_e \mathcal{L}_{\text{energy}}
+              + \lambda_m \mathcal{L}_{\text{mass}}
+\end{equation}
+
+\subsection{Dispatch optimisation}
+% Path A: discretise flow into 15 levels, MILP via Pyomo + CBC.
+
+% =========================================================
+\section{Data}
+\label{sec:data}
+
+% ENTSO-E LT day-ahead prices 2021--2024.
+% Synthetic cargo compositions from GIIGNL 2023 archetypes.
+% Ambient and seawater temperatures from Open-Meteo ERA5.
+
+% =========================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{PINN surrogate fidelity}
+% Table: MAE on W_total, T_out. Speedup ratio.
+
+\subsection{Dispatch backtest}
+% Headline number: X% cost reduction.
+
+\subsection{Composition sensitivity}
+% Figure 1: cost delta by month.
+% Figure 2: savings vs variability.
+% Figure 3: load-shift heatmap.
+% Figure 4: surrogate fidelity.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\textwidth]{figures/fig1_cost_delta.pdf}
+  \caption{Monthly cost saving from composition-aware dispatch (EUR).}
+  \label{fig:cost_delta}
+\end{figure}
+
+% =========================================================
+\section{Discussion}
+\label{sec:discussion}
+% Limitations: steady-state assumption, synthetic compositions, single FSRU.
+
+% =========================================================
+\section{Reproducibility}
+\label{sec:repro}
+% Code: \url{https://github.com/USERNAME/lng-pinn} (commit SHA: XXXX).
+% Environment: \texttt{pyproject.toml} with pinned dependencies.
+% Data: ENTSO-E pulled via \texttt{scripts/01\_pull\_entsoe.py}.
+
+% =========================================================
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

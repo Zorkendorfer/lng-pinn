@@ -1,0 +1,65 @@
+% References for LNG-PINN paper
+% One-line annotations in comments; to be expanded during Phase 6 writeup.
+
+% PINN foundations
+@article{raissi2019physics,
+  author  = {Raissi, Maziar and Perdikaris, Paris and Karniadakis, George E.},
+  title   = {Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations},
+  journal = {Journal of Computational Physics},
+  volume  = {378},
+  pages   = {686--707},
+  year    = {2019},
+  % Foundational PINN paper; defines the framework used here.
+}
+
+% Loss balancing
+@article{wang2021understanding,
+  author  = {Wang, Sifan and Teng, Yujun and Perdikaris, Paris},
+  title   = {Understanding and mitigating gradient pathologies in physics-informed neural networks},
+  journal = {SIAM Journal on Scientific Computing},
+  volume  = {43},
+  number  = {5},
+  pages   = {A3055--A3081},
+  year    = {2021},
+  % NTK-based gradient norm balancing; basis for lambda update rule in pinn.py.
+}
+
+% LNG regasification thermodynamics
+@article{lim2013lng,
+  author  = {Lim, Wonsub and Choi, Keunjae and Moon, Il},
+  title   = {{LNG} regasification: A survey},
+  journal = {Chemical Engineering and Processing: Process Intensification},
+  volume  = {93},
+  pages   = {1--15},
+  year    = {2015},
+  % Survey of ORV/SCV configurations; basis for equipment topology choice.
+}
+
+% ENTSO-E day-ahead prices
+@misc{entsoe2023,
+  author = {{ENTSO-E}},
+  title  = {Transparency Platform — Day-Ahead Prices},
+  year   = {2023},
+  url    = {https://transparency.entsoe.eu},
+  % Data source for LT day-ahead prices.
+}
+
+% GIIGNL compositions
+@misc{giignl2023,
+  author = {{GIIGNL}},
+  title  = {Annual Report 2023},
+  year   = {2023},
+  % Source for archetypal LNG cargo mole-fraction vectors.
+}
+
+% CoolProp
+@article{bell2014pure,
+  author  = {Bell, Ian H. and Wronski, Jorrit and Quoilin, Sylvain and Lemort, Vincent},
+  title   = {Pure and pseudo-pure fluid thermophysical property evaluation and the open-source thermophysical property library {CoolProp}},
+  journal = {Industrial \& Engineering Chemistry Research},
+  volume  = {53},
+  number  = {6},
+  pages   = {2498--2508},
+  year    = {2014},
+  % Reference for CoolProp HEOS backend used as ground-truth simulator.
+}
