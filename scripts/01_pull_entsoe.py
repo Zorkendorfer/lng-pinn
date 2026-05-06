@@ -5,12 +5,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Load .env if present
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+from dotenv import load_dotenv
+
+load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -20,8 +17,8 @@ from lng_pinn.market import pull_da_prices
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--start", default="2021-01-01")
-    parser.add_argument("--end",   default="2024-01-01")
-    parser.add_argument("--zone",  default="LT")
+    parser.add_argument("--end", default="2024-01-01")
+    parser.add_argument("--zone", default="LT")
     args = parser.parse_args()
 
     try:

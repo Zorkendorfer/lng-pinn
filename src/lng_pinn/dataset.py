@@ -1,4 +1,4 @@
-"""Build (X, y) training dataset by sampling the CoolProp plant simulator."""
+"""Build training dataset and hourly timeseries from the CoolProp plant simulator."""
 
 from __future__ import annotations
 
@@ -10,6 +10,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.stats.qmc import LatinHypercube
+
+from lng_pinn.composition import build_composition_series
+from lng_pinn.market import load_da_prices, pull_weather
 
 PROCESSED_DIR = Path("data/processed")
 
@@ -93,3 +96,36 @@ def build_training_set(
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     df.to_parquet(PROCESSED_DIR / "train.parquet", index=False)
     return df
+
+
+def build_timeseries(
+    start: str = "2021-01-01",
+    end: str = "2024-01-01",
+    zone: str = "LT",
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Build hourly timeseries of (price, T_amb, T_sw, composition) for dispatch.
+
+    Joins ENTSO-E day-ahead prices, Open-Meteo weather, and synthetic
+    cargo composition trajectories on a common UTC hourly index.
+
+    Returns:
+        DataFrame saved to data/processed/timeseries.parquet with columns:
+        price_eur_mwh, T_amb (K), T_sw (K), CH4, C2H6, C3H8, nC4H10, iC4H10, N2.
+    """
+    prices = load_da_prices(start, end, zone=zone)
+    weather = pull_weather(start, end)
+
+    # Align weather to price index (resample/reindex to hourly UTC)
+    idx = prices.index
+    weather = weather.reindex(idx, method="nearest", tolerance="1h")
+
+    # Synthetic composition on same index
+    comp = build_composition_series(idx, seed=seed)
+
+    ts = pd.concat([prices, weather, comp], axis=1)
+    ts = ts.dropna(subset=["price_eur_mwh"])  # drop any residual gaps
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    ts.to_parquet(PROCESSED_DIR / "timeseries.parquet")
+    return ts
