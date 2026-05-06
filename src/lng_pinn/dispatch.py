@@ -15,19 +15,19 @@ import torch
 
 from lng_pinn.pinn import PINNMLP, Scaler
 
-N_FLOW_LEVELS = 15         # discretisation resolution
-M_DOT_MIN = 10.0           # kg/s — minimum stable turndown
-M_DOT_MAX = 80.0           # kg/s — maximum send-out
-TANK_MIN = 0.05            # fraction of capacity
+N_FLOW_LEVELS = 15  # discretisation resolution
+M_DOT_MIN = 10.0  # kg/s — minimum stable turndown
+M_DOT_MAX = 80.0  # kg/s — maximum send-out
+TANK_MIN = 0.05  # fraction of capacity
 TANK_MAX = 0.95
-TANK_CAP = 180_000_000.0   # kg — LNG storage capacity (Independence FSRU ~170,000 m³ × ~450 kg/m³)
+TANK_CAP = 180_000_000.0  # kg — LNG storage capacity (Independence FSRU ~170,000 m³ × ~450 kg/m³)
 
 
 @dataclass
 class Schedule:
-    m_dot: np.ndarray        # kg/s, shape (T,)
-    cost_eur: np.ndarray     # EUR, shape (T,)
-    tank_level: np.ndarray   # fraction, shape (T+1,)
+    m_dot: np.ndarray  # kg/s, shape (T,)
+    cost_eur: np.ndarray  # EUR, shape (T,)
+    tank_level: np.ndarray  # fraction, shape (T+1,)
     total_cost: float
 
 
@@ -90,15 +90,14 @@ def optimize(
     m.L = pyo.RangeSet(0, N_FLOW_LEVELS - 1)
 
     m.x = pyo.Var(m.T, m.L, domain=pyo.Binary)
-    m.inv = pyo.Var(pyo.RangeSet(0, T), domain=pyo.NonNegativeReals,
-                    bounds=(TANK_MIN, TANK_MAX))
+    m.inv = pyo.Var(pyo.RangeSet(0, T), domain=pyo.NonNegativeReals, bounds=(TANK_MIN, TANK_MAX))
 
     # One level per hour
-    m.one_level = pyo.Constraint(m.T, rule=lambda m, t: sum(m.x[t, l] for l in m.L) == 1)
+    m.one_level = pyo.Constraint(m.T, rule=lambda m, t: sum(m.x[t, lv] for lv in m.L) == 1)
 
     # Inventory dynamics (dt = 1 h = 3600 s)
-    def inv_dynamics(m, t):
-        flow_kg_h = sum(m.x[t, l] * flow_levels[l] * 3600.0 for l in m.L)
+    def inv_dynamics(m: pyo.ConcreteModel, t: int) -> pyo.Expression:
+        flow_kg_h = sum(m.x[t, lv] * flow_levels[lv] * 3600.0 for lv in m.L)
         return m.inv[t + 1] == m.inv[t] - flow_kg_h / TANK_CAP
 
     m.inv_dyn = pyo.Constraint(m.T, rule=inv_dynamics)
@@ -106,27 +105,20 @@ def optimize(
 
     # Demand constraint
     m.demand = pyo.Constraint(
-        expr=sum(
-            sum(m.x[t, l] * flow_levels[l] * 3600.0 for l in m.L)
-            for t in m.T
-        ) >= demand_kg
+        expr=sum(sum(m.x[t, lv] * flow_levels[lv] * 3600.0 for lv in m.L) for t in m.T) >= demand_kg
     )
 
     # Objective
     m.obj = pyo.Objective(
-        expr=sum(cost_table[t, l] * m.x[t, l] for t in m.T for l in m.L),
+        expr=sum(cost_table[t, lv] * m.x[t, lv] for t in m.T for lv in m.L),
         sense=pyo.minimize,
     )
 
     solver = pyo.SolverFactory("cbc")
     solver.solve(m, tee=False)
 
-    m_dot_out = np.array([
-        sum(pyo.value(m.x[t, l]) * flow_levels[l] for l in m.L) for t in m.T
-    ])
-    cost_out = np.array([
-        sum(cost_table[t, l] * pyo.value(m.x[t, l]) for l in m.L) for t in m.T
-    ])
+    m_dot_out = np.array([sum(pyo.value(m.x[t, lv]) * flow_levels[lv] for lv in m.L) for t in m.T])
+    cost_out = np.array([sum(cost_table[t, lv] * pyo.value(m.x[t, lv]) for lv in m.L) for t in m.T])
     inv_out = np.array([pyo.value(m.inv[t]) for t in range(T + 1)])
 
     return Schedule(

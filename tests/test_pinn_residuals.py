@@ -14,7 +14,7 @@ CHECKPOINT = RESULTS_DIR / "pinn_v1.pt"
 
 
 @pytest.mark.skipif(not CHECKPOINT.exists(), reason="No trained checkpoint found")
-def test_energy_residual_below_threshold():
+def test_energy_residual_below_threshold() -> None:
     model, scaler = load(CHECKPOINT)
     model.eval()
 
@@ -32,7 +32,7 @@ def test_energy_residual_below_threshold():
 
 
 @pytest.mark.skipif(not CHECKPOINT.exists(), reason="No trained checkpoint found")
-def test_w_total_positive_on_random_inputs():
+def test_w_total_positive_on_random_inputs() -> None:
     model, scaler = load(CHECKPOINT)
     model.eval()
 

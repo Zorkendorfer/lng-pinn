@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\" -Recurse | Where-Object { !$_.PSIsContainer } | Select-Object -ExpandProperty FullName | ForEach-Object { $_.Replace\\(\"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\\\\\", \"\"\\) } | Sort-Object)",
+      "Bash(gh --version)",
+      "PowerShell(gh --version 2>$null)",
+      "PowerShell(uv --version 2>$null)",
+      "PowerShell(python --version 2>$null)",
+      "PowerShell(powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\")",
+      "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; uv python install 3.11; uv sync --dev)",
+      "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; uv sync --extra dev)",
+      "PowerShell(New-Item -ItemType Directory -Path \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\\\\.github\\\\workflows\" -Force)",
+      "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; .venv\\\\Scripts\\\\pre-commit install)",
+      "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; .venv\\\\Scripts\\\\pytest tests/test_thermo.py tests/test_plant.py -v 2>&1)",
+      "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; .venv\\\\Scripts\\\\ruff check src/ scripts/ tests/ 2>&1)",
+      "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; .venv\\\\Scripts\\\\mypy src/lng_pinn/pinn.py src/lng_pinn/dispatch.py --ignore-missing-imports 2>&1)",
+      "PowerShell($env:Path = \"C:\\\\Users\\\\j.kalnius\\\\.local\\\\bin;$env:Path\"; cd \"c:\\\\Users\\\\j.kalnius\\\\Documents\\\\LNG_PINN\"; .venv\\\\Scripts\\\\mypy src/ scripts/ tests/ --ignore-missing-imports 2>&1)"
+    ]
+  }
+}

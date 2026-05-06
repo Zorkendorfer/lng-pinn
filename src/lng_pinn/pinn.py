@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -12,7 +12,7 @@ from torch import Tensor
 
 RESULTS_DIR = Path("results/models")
 
-INPUT_DIM = 9   # CH4, C2H6, C3H8, nC4, iC4, N2, m_dot, T_amb, T_sw
+INPUT_DIM = 9  # CH4, C2H6, C3H8, nC4, iC4, N2, m_dot, T_amb, T_sw
 OUTPUT_DIM = 4  # W_pump, W_total, T_out, exergy_destruction
 
 
@@ -68,9 +68,8 @@ def energy_balance_residual(
     W_total = W_pump + W_trim (definition residual)
     """
     y = scaler.unscale_y(y_pred_raw)  # W_pump, W_total, T_out, exergy
-    W_pump  = y[:, 0]
+    W_pump = y[:, 0]
     W_total = y[:, 1]
-    W_trim  = W_total - W_pump
     # Physics constraint: W_total must be non-negative and pump ≤ total
     residual = torch.relu(-W_pump) + torch.relu(W_pump - W_total)
     return residual.mean()
@@ -106,7 +105,7 @@ def train(
 
     for step in range(n_steps):
         idx_d = torch.randint(len(X_train), (batch_size,), device=device)
-        idx_c = torch.randint(len(X_col),   (batch_size,), device=device)
+        idx_c = torch.randint(len(X_col), (batch_size,), device=device)
 
         xd, yd = X_train[idx_d], y_train[idx_d]
         xc = X_col[idx_c]
@@ -124,8 +123,10 @@ def train(
         scheduler.step()
 
         if step % 5_000 == 0:
-            print(f"step {step:6d}  loss_data={loss_data.item():.4e}  "
-                  f"loss_energy={loss_energy.item():.4e}")
+            print(
+                f"step {step:6d}  loss_data={loss_data.item():.4e}  "
+                f"loss_energy={loss_energy.item():.4e}"
+            )
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     checkpoint = {"model_state": model.state_dict(), "scaler": scaler}
@@ -134,8 +135,9 @@ def train(
 
 
 def load(path: str | Path = RESULTS_DIR / "pinn_v1.pt") -> tuple[PINNMLP, Scaler]:
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint: dict[str, Any] = torch.load(path, map_location="cpu")
     model = PINNMLP()
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
-    return model, checkpoint["scaler"]
+    scaler: Scaler = checkpoint["scaler"]
+    return model, scaler

@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,33 +20,31 @@ COMPOSITIONS = [
 
 
 @pytest.mark.parametrize("comp", COMPOSITIONS)
-def test_energy_non_negative(comp):
+def test_energy_non_negative(comp: Any) -> None:
     out = simulate(comp, m_dot=40.0, T_amb=285.0, T_sw=285.0)
     assert out.W_total > 0, "Total work must be positive"
-    assert out.W_pump  > 0, "Pump work must be positive"
-    assert out.W_trim  >= 0, "Trim heater must be non-negative"
+    assert out.W_pump > 0, "Pump work must be positive"
+    assert out.W_trim >= 0, "Trim heater must be non-negative"
 
 
 @pytest.mark.parametrize("comp", COMPOSITIONS)
-def test_pump_leq_total(comp):
+def test_pump_leq_total(comp: Any) -> None:
     out = simulate(comp, m_dot=40.0, T_amb=285.0, T_sw=285.0)
     assert out.W_pump <= out.W_total + 1e-9
 
 
 @pytest.mark.parametrize("comp", COMPOSITIONS)
-def test_send_out_temperature_reasonable(comp):
+def test_send_out_temperature_reasonable(comp: Any) -> None:
     out = simulate(comp, m_dot=40.0, T_amb=285.0, T_sw=285.0)
     assert 270 < out.T_out < 310, f"T_out={out.T_out} K out of expected range"
 
 
-def test_seawater_duty_positive():
+def test_seawater_duty_positive() -> None:
     out = simulate(COMPOSITIONS[0], m_dot=40.0, T_amb=285.0, T_sw=285.0)
     assert out.Q_sw > 0
 
 
-def test_higher_flow_more_total_work():
+def test_higher_flow_more_total_work() -> None:
     out_lo = simulate(COMPOSITIONS[0], m_dot=20.0, T_amb=285.0, T_sw=285.0)
     out_hi = simulate(COMPOSITIONS[0], m_dot=60.0, T_amb=285.0, T_sw=285.0)
-    # W_total is per kg, so should be roughly similar; absolute cost scales with m_dot
-    # At least verify both are physically sensible
     assert out_lo.W_total > 0 and out_hi.W_total > 0

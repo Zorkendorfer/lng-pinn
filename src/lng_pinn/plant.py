@@ -14,24 +14,24 @@ from dataclasses import dataclass
 
 import CoolProp.CoolProp as CP
 
-from lng_pinn.thermo import get_state, lower_heating_value
+from lng_pinn.thermo import get_state
 
 # Plant constants (Independence FSRU reference values)
-ETA_PUMP = 0.75          # isentropic pump efficiency
-ETA_TRIM_HEATER = 0.98   # trim heater thermal efficiency
-P_IN = 1.0e5             # Pa — LNG storage pressure (atmospheric after boil-off)
-T_IN = 111.0             # K  — LNG storage temperature (bubble point at 1 bar, approx)
-T_SENDOUT = 278.15       # K  — target send-out temperature (5 °C)
-P_OUT_DEFAULT = 80.0e5   # Pa — send-out pressure (80 bar)
+ETA_PUMP = 0.75  # isentropic pump efficiency
+ETA_TRIM_HEATER = 0.98  # trim heater thermal efficiency
+P_IN = 1.0e5  # Pa — LNG storage pressure (atmospheric after boil-off)
+T_IN = 111.0  # K  — LNG storage temperature (bubble point at 1 bar, approx)
+T_SENDOUT = 278.15  # K  — target send-out temperature (5 °C)
+P_OUT_DEFAULT = 80.0e5  # Pa — send-out pressure (80 bar)
 
 
 @dataclass
 class PlantOutput:
-    W_pump: float          # kWh / kg — pump electrical work
-    W_trim: float          # kWh / kg — trim heater electrical work
-    W_total: float         # kWh / kg — total electrical energy
-    T_out: float           # K  — actual send-out gas temperature
-    Q_sw: float            # kWh / kg — seawater heat duty (ORV)
+    W_pump: float  # kWh / kg — pump electrical work
+    W_trim: float  # kWh / kg — trim heater electrical work
+    W_total: float  # kWh / kg — total electrical energy
+    T_out: float  # K  — actual send-out gas temperature
+    Q_sw: float  # kWh / kg — seawater heat duty (ORV)
     exergy_destruction: float  # kWh / kg — exergy destroyed in vaporiser
 
 
@@ -59,43 +59,41 @@ def simulate(
 
     # --- Inlet state (saturated liquid) ---
     state.update(CP.PT_INPUTS, P_IN, T_IN)
-    h_in = state.hmolar()         # J/mol
-    s_in = state.smolar()         # J/(mol·K)
-    rho_in = state.rhomass()      # kg/m³
-    mw = state.molar_mass()       # kg/mol
+    h_in = state.hmolar()  # J/mol
+    rho_in = state.rhomass()  # kg/m³
+    mw = state.molar_mass()  # kg/mol
 
     # --- Pump: isentropic work, corrected for efficiency ---
     # Approximation: liquid is incompressible, v ≈ 1/rho_in
-    v_liq = 1.0 / rho_in          # m³/kg
-    w_pump_is = v_liq * (P_out - P_IN)   # J/kg (isentropic)
-    w_pump = w_pump_is / ETA_PUMP         # J/kg (actual)
+    v_liq = 1.0 / rho_in  # m³/kg
+    w_pump_is = v_liq * (P_out - P_IN)  # J/kg (isentropic)
+    w_pump = w_pump_is / ETA_PUMP  # J/kg (actual)
 
     # Enthalpy after pump
-    h_after_pump = h_in + w_pump * mw    # J/mol (approximate; liquid enthalpy rise)
+    h_after_pump = h_in + w_pump * mw  # J/mol (approximate; liquid enthalpy rise)
 
     # --- ORV: vaporise and heat to near send-out T using seawater ---
     state.update(CP.PT_INPUTS, P_out, T_SENDOUT)
-    h_out_target = state.hmolar()   # J/mol — target enthalpy at T_sendout, P_out
-
-    q_orv = h_out_target - h_after_pump   # J/mol — heat from seawater in ORV
-    q_orv_kg = q_orv / mw                 # J/kg
+    h_out_target = state.hmolar()  # J/mol — target enthalpy at T_sendout, P_out
 
     # Trim heater picks up any shortfall (or is zero if ORV overdoes it)
     # For simplicity, assume ORV heats exactly to T_sw - 3 K (approach temperature)
     T_orv_out = min(T_sw - 3.0, T_SENDOUT)
     state.update(CP.PT_INPUTS, P_out, T_orv_out)
-    h_orv_out = state.hmolar()   # J/mol
+    h_orv_out = state.hmolar()  # J/mol
 
-    q_orv_actual = max(0.0, h_orv_out - h_after_pump)   # J/mol
-    q_sw_kg = q_orv_actual / mw                          # J/kg
+    q_orv_actual = max(0.0, h_orv_out - h_after_pump)  # J/mol
+    q_sw_kg = q_orv_actual / mw  # J/kg
 
     # Trim heater
-    q_trim = max(0.0, h_out_target - h_orv_out)   # J/mol
-    w_trim = (q_trim / mw) / ETA_TRIM_HEATER       # J/kg
+    q_trim = max(0.0, h_out_target - h_orv_out)  # J/mol
+    w_trim = (q_trim / mw) / ETA_TRIM_HEATER  # J/kg
 
     # --- Actual outlet ---
-    T_out = T_SENDOUT if T_orv_out >= T_SENDOUT else T_orv_out + (q_trim / mw) / (
-        state.cpmass() or 2200.0
+    T_out = (
+        T_SENDOUT
+        if T_orv_out >= T_SENDOUT
+        else T_orv_out + (q_trim / mw) / (state.cpmass() or 2200.0)
     )
 
     # --- Exergy destruction in ORV ---

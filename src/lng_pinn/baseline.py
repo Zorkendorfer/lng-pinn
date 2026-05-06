@@ -7,7 +7,6 @@ the composition-aware dispatch.
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from lng_pinn.dispatch import Schedule, optimize
