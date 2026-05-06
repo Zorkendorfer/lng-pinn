@@ -11,9 +11,9 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Any
 
 import CoolProp.CoolProp as CP
-from CoolProp.AbstractState import AbstractState
 
 # Species in canonical order; mole fractions must sum to 1.
 SPECIES = ("Methane", "Ethane", "Propane", "n-Butane", "IsoButane", "Nitrogen")
@@ -34,14 +34,14 @@ def _composition_key(x: tuple[float, ...]) -> str:
 
 
 @lru_cache(maxsize=512)
-def _get_state(composition_key: str, x: tuple[float, ...]) -> AbstractState:
+def _get_state(composition_key: str, x: tuple[float, ...]) -> Any:
     fluid_str = "&".join(SPECIES)
-    state = AbstractState("HEOS", fluid_str)
+    state = CP.AbstractState("HEOS", fluid_str)
     state.set_mole_fractions(list(x))
     return state
 
 
-def get_state(x: tuple[float, ...]) -> AbstractState:
+def get_state(x: tuple[float, ...]) -> Any:
     """Return a cached AbstractState for the given mole-fraction tuple."""
     key = _composition_key(x)
     return _get_state(key, x)
@@ -64,8 +64,8 @@ def lower_heating_value(x: tuple[float, ...]) -> float:
     """Return molar LHV (J/mol) of the mixture via component LHVs."""
     # LHV values (J/mol) from NIST/GPA at 25 °C, 1 atm
     lhv_components = {
-        "Methane":   802_300.0,
-        "Ethane":  1_427_800.0,
+        "Methane": 802_300.0,
+        "Ethane": 1_427_800.0,
         "Propane": 2_043_100.0,
         "n-Butane": 2_657_400.0,
         "IsoButane": 2_651_400.0,
