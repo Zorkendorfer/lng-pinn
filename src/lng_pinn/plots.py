@@ -1,4 +1,4 @@
-"""All paper figures generated here — one function per figure."""
+"""All paper figures generated here - one function per figure."""
 
 from __future__ import annotations
 
@@ -32,12 +32,20 @@ def fig_cost_delta(
 
 
 def fig_sensitivity(sensitivity_df: pd.DataFrame) -> None:
-    """Cost savings vs composition variability metric."""
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.scatter(sensitivity_df["variability"], sensitivity_df["saving_eur"], alpha=0.6)
-    ax.set_xlabel("Composition variability (std of CH4 mole fraction)")
-    ax.set_ylabel("Total cost saving (EUR)")
-    ax.set_title("Cost saving vs LNG compositional variability")
+    """Cost savings vs composition and price-regime metrics."""
+    panels = [
+        ("variability", "std(CH4 mole fraction)"),
+        ("price_volatility", "price volatility (EUR/MWh)"),
+        ("price_ch4_corr", "corr(price, CH4)"),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharey=True)
+    for ax, (col, label) in zip(axes, panels, strict=True):
+        ax.scatter(sensitivity_df[col], sensitivity_df["saving_eur"], alpha=0.65)
+        corr = sensitivity_df[[col, "saving_eur"]].corr().iloc[0, 1]
+        ax.set_xlabel(label)
+        ax.set_title(f"r = {corr:.2f}")
+    axes[0].set_ylabel("Total cost saving (EUR)")
+    fig.suptitle("Dispatch saving drivers by rolling window", y=1.02)
     fig.tight_layout()
     fig.savefig(FIG_DIR / "fig2_sensitivity.pdf")
     plt.close(fig)
@@ -48,7 +56,7 @@ def fig_load_shift_heatmap(
     blind_df: pd.DataFrame,
     timeseries_df: pd.DataFrame,
 ) -> None:
-    """Heatmap: (price quantile, methane number) → load shift."""
+    """Heatmap: (price quantile, methane number) -> load shift."""
     price_q = pd.qcut(timeseries_df["price_eur_mwh"], q=5, labels=False)
     ch4 = timeseries_df["CH4"]
     ch4_q = pd.qcut(ch4, q=5, labels=False)
@@ -59,7 +67,7 @@ def fig_load_shift_heatmap(
     sns.heatmap(table, annot=True, fmt=".1f", ax=ax, cmap="RdBu_r", center=0)
     ax.set_xlabel("CH4 quantile (proxy for methane number)")
     ax.set_ylabel("Price quantile")
-    ax.set_title("Load shift: aware − blind (kg/s)")
+    ax.set_title("Load shift: aware - blind (kg/s)")
     fig.tight_layout()
     fig.savefig(FIG_DIR / "fig3_load_shift.pdf")
     plt.close(fig)

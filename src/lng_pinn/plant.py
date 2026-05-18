@@ -17,22 +17,35 @@ import CoolProp.CoolProp as CP
 from lng_pinn.thermo import get_state
 
 # Plant constants (Independence FSRU reference values)
-ETA_PUMP = 0.75  # isentropic pump efficiency
+ETA_PUMP_BEP = 0.78        # peak isentropic pump efficiency (at BEP)
+M_DOT_BEP = 45.0           # kg/s - best-efficiency-point flow rate
+ETA_PUMP_CURVATURE = 8e-5  # (kg/s)^-2 - quadratic curvature around BEP
+# B2 (trim heater turndown penalty) explicitly skipped for v1.1 - candidate for v2.
 ETA_TRIM_HEATER = 0.98  # trim heater thermal efficiency
-P_IN = 1.0e5  # Pa — LNG storage pressure (atmospheric after boil-off)
-T_IN = 111.0  # K  — LNG storage temperature (bubble point at 1 bar, approx)
-T_SENDOUT = 278.15  # K  — target send-out temperature (5 °C)
-P_OUT_DEFAULT = 80.0e5  # Pa — send-out pressure (80 bar)
+P_IN = 1.0e5  # Pa - LNG storage pressure (atmospheric after boil-off)
+T_IN = 111.0  # K  - LNG storage temperature (bubble point at 1 bar, approx)
+T_SENDOUT = 278.15  # K  - target send-out temperature (5  deg C)
+P_OUT_DEFAULT = 80.0e5  # Pa - send-out pressure (80 bar)
+J_TO_KWH = 1.0 / 3_600_000.0  # conversion factor
+
+
+def pump_efficiency(m_dot: float) -> float:
+    """Quadratic pump efficiency curve centred on the best-efficiency point.
+
+    Conservative literature values: large cryogenic pumps lose ~10-15
+    efficiency points at 25% and 150% of BEP. See Karassik, Pump Handbook section 2.
+    """
+    return ETA_PUMP_BEP - ETA_PUMP_CURVATURE * (m_dot - M_DOT_BEP) ** 2
 
 
 @dataclass
 class PlantOutput:
-    W_pump: float  # kWh / kg — pump electrical work
-    W_trim: float  # kWh / kg — trim heater electrical work
-    W_total: float  # kWh / kg — total electrical energy
-    T_out: float  # K  — actual send-out gas temperature
-    Q_sw: float  # kWh / kg — seawater heat duty (ORV)
-    exergy_destruction: float  # kWh / kg — exergy destroyed in vaporiser
+    W_pump: float  # kWh / kg - pump electrical work
+    W_trim: float  # kWh / kg - trim heater electrical work
+    W_total: float  # kWh / kg - total electrical energy
+    T_out: float  # K  - actual send-out gas temperature
+    Q_sw: float  # kWh / kg - seawater heat duty (ORV)
+    exergy_destruction: float  # kWh / kg - exergy destroyed in vaporiser
 
 
 def simulate(
@@ -60,16 +73,17 @@ def simulate(
     # --- Inlet state (saturated liquid) ---
     state.update(CP.PT_INPUTS, P_IN, T_IN)
     h_in = state.hmolar()    # J/mol
-    s_in = state.smolar()    # J/(mol·K)
-    rho_in = state.rhomass() # kg/m³
+    s_in = state.smolar()    # J/(mol*K)
+    rho_in = state.rhomass() # kg/m^3
     mw = state.molar_mass()  # kg/mol
 
-    # --- Pump: isentropic work, corrected for efficiency ---
-    # Approximation: liquid is incompressible, v ≈ 1/rho_in
-    v_liq = 1.0 / rho_in                    # m³/kg
-    w_pump_is = v_liq * (P_out - P_IN)      # J/kg (isentropic)
-    w_pump = w_pump_is / ETA_PUMP           # J/kg (actual)
-    h_after_pump = h_in + w_pump * mw       # J/mol
+    # --- Pump: isentropic work, corrected for flow-dependent efficiency ---
+    # Approximation: liquid is incompressible, v ~ 1/rho_in
+    v_liq = 1.0 / rho_in                         # m^3/kg
+    w_pump_is = v_liq * (P_out - P_IN)           # J/kg (isentropic)
+    eta_p = pump_efficiency(m_dot)
+    w_pump = w_pump_is / eta_p                   # J/kg (actual)
+    h_after_pump = h_in + w_pump * mw            # J/mol
 
     # --- Target state at send-out conditions ---
     state.update(CP.PT_INPUTS, P_out, T_SENDOUT)
@@ -79,8 +93,8 @@ def simulate(
     T_orv_out = min(T_sw - 3.0, T_SENDOUT)
     state.update(CP.PT_INPUTS, P_out, T_orv_out)
     h_orv_out = state.hmolar()   # J/mol
-    s_orv_out = state.smolar()   # J/(mol·K)
-    cp_orv = state.cpmass()      # J/(kg·K)
+    s_orv_out = state.smolar()   # J/(mol*K)
+    cp_orv = state.cpmass()      # J/(kg*K)
 
     q_orv_actual = max(0.0, h_orv_out - h_after_pump)  # J/mol
     q_sw_kg = q_orv_actual / mw                         # J/kg
@@ -104,7 +118,6 @@ def simulate(
     exergy_stream_gain = (h_orv_out - h_in) / mw - T0 * (s_orv_out - s_in) / mw
     exergy_destruction = max(0.0, exergy_in_sw - exergy_stream_gain)
 
-    J_TO_KWH = 1.0 / 3_600_000.0
     return PlantOutput(
         W_pump=w_pump * J_TO_KWH,
         W_trim=w_trim * J_TO_KWH,

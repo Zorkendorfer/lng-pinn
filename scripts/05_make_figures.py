@@ -33,14 +33,60 @@ def build_sensitivity_table(
     """Summarise dispatch savings by composition-variability window."""
     horizon = f"{horizon_days}D"
     saving = (blind_df["cost_eur"] - aware_df["cost_eur"]).resample(horizon).sum()
-    ch4 = ts_df["CH4"].reindex(aware_df.index)
-    ch4_std = ch4.resample(horizon).std().rename("variability")
-    ch4_range = ch4.resample(horizon).apply(lambda s: s.max() - s.min()).rename("ch4_range")
-    table = pd.concat([saving.rename("saving_eur"), ch4_std, ch4_range], axis=1).dropna()
+    aligned = ts_df[["price_eur_mwh", "CH4"]].reindex(aware_df.index)
+    grouped = aligned.resample(horizon)
+    ch4_std = grouped["CH4"].std().rename("variability")
+    ch4_range = grouped["CH4"].apply(lambda s: s.max() - s.min()).rename("ch4_range")
+    price_volatility = grouped["price_eur_mwh"].std().rename("price_volatility")
+    price_ch4_corr = grouped.apply(
+        lambda df: df["price_eur_mwh"].corr(df["CH4"])
+        if df["price_eur_mwh"].nunique() > 1 and df["CH4"].nunique() > 1
+        else 0.0
+    ).rename("price_ch4_corr")
+    table = pd.concat(
+        [
+            saving.rename("saving_eur"),
+            ch4_std,
+            ch4_range,
+            price_volatility,
+            price_ch4_corr,
+        ],
+        axis=1,
+    ).dropna()
     table = table.reset_index().rename(columns={"time": "start_time", "index": "start_time"})
     table.to_parquet(RESULTS_DIR / "sensitivity.parquet", index=False)
     table.to_csv(RESULTS_DIR / "sensitivity.csv", index=False)
     return table
+
+
+def build_yearly_summary(
+    aware_df: pd.DataFrame,
+    horizon_df: pd.DataFrame,
+    annual_df: pd.DataFrame,
+    constant_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build the side-by-side yearly cost table required by v1.1."""
+    yearly = pd.DataFrame(
+        {
+            "aware_eur": aware_df["cost_eur"].resample("YE").sum(),
+            "blind_horizon_eur": horizon_df["cost_eur"].resample("YE").sum(),
+            "blind_annual_eur": annual_df["cost_eur"].resample("YE").sum(),
+            "constant_eur": constant_df["cost_eur"].resample("YE").sum(),
+        }
+    ).dropna()
+    yearly["saving_vs_horizon_pct"] = (
+        (yearly["blind_horizon_eur"] - yearly["aware_eur"]) / yearly["blind_horizon_eur"] * 100
+    )
+    yearly["saving_vs_annual_pct"] = (
+        (yearly["blind_annual_eur"] - yearly["aware_eur"]) / yearly["blind_annual_eur"] * 100
+    )
+    yearly["saving_vs_constant_pct"] = (
+        (yearly["constant_eur"] - yearly["aware_eur"]) / yearly["constant_eur"] * 100
+    )
+    yearly = yearly.reset_index().rename(columns={"time": "year", "index": "year"})
+    yearly["year"] = pd.to_datetime(yearly["year"], utc=True).dt.year
+    yearly.to_csv(RESULTS_DIR / "yearly_summary.csv", index=False)
+    return yearly
 
 
 def build_fidelity_table(
@@ -104,16 +150,35 @@ def main() -> None:
     print(f"git_sha={git_sha}")
 
     aware_df = pd.read_parquet(RESULTS_DIR / "dispatch_v1.parquet")
-    blind_df  = pd.read_parquet(RESULTS_DIR / "baseline_v1.parquet")
-    ts_df     = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
+    horizon_path = RESULTS_DIR / "baseline_horizon_v1.parquet"
+    annual_path = RESULTS_DIR / "baseline_annual_v1.parquet"
+    constant_path = RESULTS_DIR / "baseline_constant_v1.parquet"
+    blind_path = horizon_path if horizon_path.exists() else RESULTS_DIR / "baseline_v1.parquet"
+    blind_df = pd.read_parquet(blind_path)
+    annual_df = pd.read_parquet(annual_path) if annual_path.exists() else blind_df.copy()
+    constant_df = pd.read_parquet(constant_path) if constant_path.exists() else blind_df.copy()
+    ts_df = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
 
     aware_df["time"] = pd.to_datetime(aware_df["time"], utc=True)
-    blind_df["time"]  = pd.to_datetime(blind_df["time"], utc=True)
+    blind_df["time"] = pd.to_datetime(blind_df["time"], utc=True)
+    annual_df["time"] = pd.to_datetime(annual_df["time"], utc=True)
+    constant_df["time"] = pd.to_datetime(constant_df["time"], utc=True)
     aware_df = aware_df.set_index("time")
-    blind_df  = blind_df.set_index("time")
+    blind_df = blind_df.set_index("time")
+    annual_df = annual_df.set_index("time")
+    constant_df = constant_df.set_index("time")
     ts_df.index = pd.to_datetime(ts_df.index, utc=True)
 
     export_csv_tables()
+    build_yearly_summary(aware_df, blind_df, annual_df, constant_df)
+    print("yearly_summary.csv written")
+
+    surrogate_eval_path = RESULTS_DIR / "surrogate_eval.parquet"
+    if surrogate_eval_path.exists():
+        pd.read_parquet(surrogate_eval_path).to_csv(
+            RESULTS_DIR / "surrogate_eval.csv",
+            index=False,
+        )
 
     fig_cost_delta(aware_df, blind_df)
     print("fig1_cost_delta.pdf written")

@@ -46,7 +46,18 @@ def _sample_compositions(lhs_cols: np.ndarray) -> np.ndarray:
 
 def _simulate_one(args: tuple[Any, ...]) -> dict[str, float] | None:
     """Top-level function so it can be pickled by ProcessPoolExecutor."""
-    from lng_pinn.plant import simulate  # imported inside worker to avoid pickling issues
+    import CoolProp.CoolProp as CP
+
+    from lng_pinn.plant import (  # imported inside worker to avoid pickling issues
+        J_TO_KWH,
+        P_IN,
+        P_OUT_DEFAULT,
+        T_IN,
+        T_SENDOUT,
+        pump_efficiency,
+        simulate,
+    )
+    from lng_pinn.thermo import get_state
 
     x, m_dot, T_amb, T_sw = args
     try:
@@ -54,6 +65,19 @@ def _simulate_one(args: tuple[Any, ...]) -> dict[str, float] | None:
     except ValueError:
         # CoolProp can't find a density solution (two-phase or near-critical region)
         return None
+
+    # Enthalpy at storage and send-out conditions (needed for PINN energy balance loss)
+    state = get_state(x)
+    state.update(CP.PT_INPUTS, P_IN, T_IN)
+    h_in_per_kg = state.hmolar() / state.molar_mass()   # J/kg
+    rho_in = state.rhomass()                             # kg/m^3
+    state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
+    h_out_per_kg = state.hmolar() / state.molar_mass()  # J/kg
+
+    # Analytical pump work (incompressible liquid, flow-dependent efficiency)
+    eta = pump_efficiency(float(m_dot))
+    W_pump_expected = (P_OUT_DEFAULT - P_IN) / rho_in / eta * J_TO_KWH  # kWh/kg
+
     return {
         "CH4": x[0],
         "C2H6": x[1],
@@ -70,6 +94,9 @@ def _simulate_one(args: tuple[Any, ...]) -> dict[str, float] | None:
         "T_out": out.T_out,
         "Q_sw": out.Q_sw,
         "exergy_destruction": out.exergy_destruction,
+        "h_in_per_kg": h_in_per_kg,
+        "h_out_per_kg": h_out_per_kg,
+        "W_pump_expected": W_pump_expected,
     }
 
 
@@ -81,7 +108,8 @@ def build_training_set(
     """Sample N operating points via LHS, simulate in parallel, return DataFrame.
 
     Columns: CH4, C2H6, C3H8, nC4H10, iC4H10, N2, m_dot, T_amb, T_sw,
-             W_pump, W_trim, W_total, T_out, Q_sw, exergy_destruction
+             W_pump, W_trim, W_total, T_out, Q_sw, exergy_destruction,
+             h_in_per_kg, h_out_per_kg, W_pump_expected
     """
     sampler = LatinHypercube(d=8, seed=seed)
     samples = sampler.random(N)
