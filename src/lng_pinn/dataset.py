@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -121,11 +121,15 @@ def build_training_set(
 
     args = [(tuple(compositions[i]), m_dot[i], T_amb[i], T_sw[i]) for i in range(N)]
 
-    n_workers = workers or max(1, (os.cpu_count() or 1))
-    chunksize = max(N // (n_workers * 4), 1)
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        raw_iter = executor.map(_simulate_one, args, chunksize=chunksize)
-        raw = list(tqdm(raw_iter, total=N, desc="Simulating", unit="pts"))
+    n_workers = workers or max(1, min(4, os.cpu_count() or 1))
+    if n_workers == 1:
+        raw = [_simulate_one(arg) for arg in tqdm(args, total=N, desc="Simulating", unit="pts")]
+    else:
+        raw = []
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = [executor.submit(_simulate_one, arg) for arg in args]
+            for future in tqdm(as_completed(futures), total=N, desc="Simulating", unit="pts"):
+                raw.append(future.result())
 
     records = [r for r in raw if r is not None]
     n_skipped = N - len(records)

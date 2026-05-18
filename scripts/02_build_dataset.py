@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--start", default="2021-01-01")
     parser.add_argument("--end", default="2024-01-01")
+    parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true", help="N=1000, skip timeseries build")
     args = parser.parse_args()
 
@@ -34,7 +35,7 @@ def main() -> None:
 
     # --- Training set ---
     t0 = time.perf_counter()
-    df = build_training_set(N=N, seed=args.seed)
+    df = build_training_set(N=N, seed=args.seed, workers=args.workers)
     elapsed = time.perf_counter() - t0
     print(f"Training set done in {elapsed:.1f}s  ({N / elapsed:.0f} samples/s)")
     print(df.describe())
