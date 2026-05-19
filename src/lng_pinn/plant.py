@@ -71,11 +71,14 @@ def simulate(
     state = get_state(x)
 
     # --- Inlet state (saturated liquid) ---
+    # specify_phase avoids solver divergence when the singleton was previously at high P.
+    state.specify_phase(CP.iphase_liquid)
     state.update(CP.PT_INPUTS, P_IN, T_IN)
     h_in = state.hmolar()    # J/mol
     s_in = state.smolar()    # J/(mol*K)
     rho_in = state.rhomass() # kg/m^3
     mw = state.molar_mass()  # kg/mol
+    state.unspecify_phase()
 
     # --- Pump: isentropic work, corrected for flow-dependent efficiency ---
     # Approximation: liquid is incompressible, v ~ 1/rho_in

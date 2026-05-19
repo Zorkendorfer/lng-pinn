@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import torch
 from scipy.optimize import Bounds, LinearConstraint, milp
-from scipy.sparse import lil_matrix
+from scipy.sparse import csr_matrix, vstack
 
 from lng_pinn.pinn import PINNMLP, Scaler
 
@@ -41,28 +41,30 @@ def _pinn_cost_table(
     """Pre-compute cost (EUR/h) for each (hour, flow_level) pair.
 
     Returns array of shape (T, N_FLOW_LEVELS).
+    Batches all (T × L) inputs in a single PINN forward pass.
     """
     T = len(horizon_df)
     L = len(flow_levels)
-    cost_table = np.zeros((T, L))
-
     comp_cols = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2"]
 
-    with torch.no_grad():
-        for l_idx, m in enumerate(flow_levels):
-            rows = []
-            for _, row in horizon_df.iterrows():
-                x = [row[c] for c in comp_cols] + [m, row["T_amb"], row["T_sw"]]
-                rows.append(x)
-            X = torch.tensor(rows, dtype=torch.float32)
-            X_norm = scaler.scale_x(X)
-            y_norm = model(X_norm)
-            y = scaler.unscale_y(y_norm).numpy()
-            W_total = y[:, 1]  # kWh/kg
-            price = horizon_df["price_eur_mwh"].values
-            cost_table[:, l_idx] = price * W_total * m * 3600.0 / 1000.0  # EUR/h
+    # Base features repeated for each flow level: (T, 8)
+    base = horizon_df[comp_cols + ["T_amb", "T_sw"]].values.astype(np.float32)  # (T, 8)
+    # Tile: (T*L, 9) — repeat each hour L times, insert m_dot column
+    base_rep = np.repeat(base, L, axis=0)  # (T*L, 8)
+    m_rep = np.tile(flow_levels.astype(np.float32), T)  # (T*L,)
+    X_np = np.concatenate(
+        [base_rep[:, :6], m_rep[:, None], base_rep[:, 6:]], axis=1
+    )  # (T*L, 9): comp + m_dot + T_amb + T_sw
 
-    return cost_table
+    with torch.no_grad():
+        X = torch.from_numpy(X_np)
+        W_total = scaler.unscale_y(model(scaler.scale_x(X)))[:, 1].numpy()  # (T*L,)
+
+    W_total = W_total.reshape(T, L)  # (T, L)
+    price = horizon_df["price_eur_mwh"].values[:, None]  # (T, 1)
+    # cost (EUR/h) = price (EUR/MWh) * W_total (kWh/kg) * m_dot (kg/s) * 3600 s / 1000
+    cost_table = price * W_total * flow_levels[None, :] * 3600.0 / 1000.0
+    return cost_table.astype(np.float64)
 
 
 def optimize(
@@ -92,42 +94,40 @@ def optimize(
     n_vars = T * N_FLOW_LEVELS
     flow_kg_h = flow_levels * 3600.0
 
-    n_constraints = T + 1 + T
-    constraint = lil_matrix((n_constraints, n_vars), dtype=float)
-    lb = np.full(n_constraints, -np.inf)
-    ub = np.full(n_constraints, np.inf)
-
-    # One level per hour.
+    # --- one-level-per-hour + demand (T+1 rows) ---
+    # Build as dense then convert; T+1 rows is tiny.
+    eq_block = np.zeros((T + 1, n_vars), dtype=np.float64)
     for t in range(T):
-        row = t
-        start = t * N_FLOW_LEVELS
-        constraint[row, start : start + N_FLOW_LEVELS] = 1.0
-        lb[row] = 1.0
-        ub[row] = 1.0
-
-    # Demand over the full horizon.
-    demand_row = T
+        eq_block[t, t * N_FLOW_LEVELS : (t + 1) * N_FLOW_LEVELS] = 1.0
     for t in range(T):
-        start = t * N_FLOW_LEVELS
-        constraint[demand_row, start : start + N_FLOW_LEVELS] = flow_kg_h
-    lb[demand_row] = demand_kg
+        eq_block[T, t * N_FLOW_LEVELS : (t + 1) * N_FLOW_LEVELS] = flow_kg_h
+    lb = np.full(T + 1, -np.inf)
+    ub = np.full(T + 1, np.inf)
+    lb[:T] = 1.0
+    ub[:T] = 1.0
+    lb[T] = demand_kg
 
-    # Inventory bounds after each hour, with inv[t] = inv0 - cumulative_flow / TANK_CAP.
+    # Inventory bounds: cumulative outflow after each hour must stay in [min, max].
+    # Build a (T, T*L) lower-triangular block matrix in CSR directly.
+    # Row t: sum of flow_kg_h[l] * x[prev_t, l] for prev_t <= t, all l.
     min_cumulative = (inv0 - TANK_MAX) * TANK_CAP
     max_cumulative = (inv0 - TANK_MIN) * TANK_CAP
-    for t in range(T):
-        row = T + 1 + t
-        for prev_t in range(t + 1):
-            start = prev_t * N_FLOW_LEVELS
-            constraint[row, start : start + N_FLOW_LEVELS] = flow_kg_h
-        lb[row] = min_cumulative
-        ub[row] = max_cumulative
+    # Lower-triangular cumulative block: entry (t, prev_t*L+l) = flow_kg_h[l] for prev_t<=t.
+    # Build via Kronecker: tril(ones(T,T)) ⊗ flow_kg_h row.
+    tril_mask = np.tril(np.ones((T, T), dtype=np.float64))  # (T, T)
+    # Each "block column" prev_t has L sub-columns with values flow_kg_h.
+    # Reshape to (T, T*L): repeat each tril column L times, scale by flow_kg_h.
+    inv_dense = np.kron(tril_mask, flow_kg_h[None, :])  # (T, T*L)
+    inv_block = csr_matrix(inv_dense)
+    constraint_csr = vstack([csr_matrix(eq_block), inv_block])
+    lb = np.concatenate([lb, np.full(T, min_cumulative)])
+    ub = np.concatenate([ub, np.full(T, max_cumulative)])
 
     result = milp(
         c=cost_table.reshape(n_vars),
-        integrality=np.ones(n_vars),
+        integrality=np.zeros(n_vars),  # LP relaxation — exact due to one-hot TU structure
         bounds=Bounds(0.0, 1.0),
-        constraints=LinearConstraint(constraint.tocsr(), lb, ub),
+        constraints=LinearConstraint(constraint_csr, lb, ub),
     )
     if not result.success:
         raise RuntimeError(f"Dispatch optimization failed: {result.message}")

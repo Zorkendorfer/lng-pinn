@@ -67,12 +67,17 @@ def _simulate_one(args: tuple[Any, ...]) -> dict[str, float] | None:
         return None
 
     # Enthalpy at storage and send-out conditions (needed for PINN energy balance loss)
-    state = get_state(x)
-    state.update(CP.PT_INPUTS, P_IN, T_IN)
-    h_in_per_kg = state.hmolar() / state.molar_mass()   # J/kg
-    rho_in = state.rhomass()                             # kg/m^3
-    state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
-    h_out_per_kg = state.hmolar() / state.molar_mass()  # J/kg
+    try:
+        state = get_state(x)
+        state.specify_phase(CP.iphase_liquid)
+        state.update(CP.PT_INPUTS, P_IN, T_IN)
+        h_in_per_kg = state.hmolar() / state.molar_mass()   # J/kg
+        rho_in = state.rhomass()                             # kg/m^3
+        state.unspecify_phase()
+        state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
+        h_out_per_kg = state.hmolar() / state.molar_mass()  # J/kg
+    except ValueError:
+        return None  # composition not liquid at storage conditions
 
     # Analytical pump work (incompressible liquid, flow-dependent efficiency)
     eta = pump_efficiency(float(m_dot))

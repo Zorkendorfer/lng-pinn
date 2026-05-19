@@ -16,11 +16,15 @@ from lng_pinn.baseline import (
     optimize_blind_horizon,
     optimize_constant_flow,
 )
+from lng_pinn.composition import CARGO_CYCLE_DAYS
 from lng_pinn.dispatch import M_DOT_MAX, optimize
 from lng_pinn.pinn import load
 
 PROCESSED_DIR = Path("data/processed")
 RESULTS_DIR = Path("results/tables")
+
+CARGO_CYCLE_HOURS = CARGO_CYCLE_DAYS * 24  # 288 h — matches composition change cadence
+CARGO_AMOUNT = 0.55  # fraction of TANK_CAP per delivery (~99 M kg, partial cargo)
 
 
 def _append_records(
@@ -67,11 +71,20 @@ def main() -> None:
     horizon_records: list[dict[str, object]] = []
     annual_records: list[dict[str, object]] = []
     constant_records: list[dict[str, object]] = []
-    inv_aware = inv_horizon = inv_annual = inv_constant = 0.5
+    # Start at 85% so max frontloading (3.8%/day) can't drain to infeasibility before first cargo.
+    inv_aware = inv_horizon = inv_annual = inv_constant = 0.85
+
+    demand_kg = M_DOT_MAX * 0.6 * H * 3600  # fixed; cargo schedule keeps tanks healthy
 
     for start in tqdm(starts, total=n_windows, desc="Dispatch windows", unit="day"):
+        # Cargo delivery at cycle boundaries (same event for all strategies)
+        if start > 0 and start % CARGO_CYCLE_HOURS == 0:
+            inv_aware    = min(0.92, inv_aware    + CARGO_AMOUNT)
+            inv_horizon  = min(0.92, inv_horizon  + CARGO_AMOUNT)
+            inv_annual   = min(0.92, inv_annual   + CARGO_AMOUNT)
+            inv_constant = min(0.92, inv_constant + CARGO_AMOUNT)
+
         window = ts.iloc[start : start + H]
-        demand_kg = M_DOT_MAX * 0.6 * H * 3600  # 60% utilisation target
         record_hours = min(step, len(window))
 
         aware_sched = optimize(window, model, scaler, demand_kg, inv_aware)

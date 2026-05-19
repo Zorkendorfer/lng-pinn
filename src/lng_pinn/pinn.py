@@ -230,6 +230,9 @@ def train(
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    # Move everything to CPU before saving so the checkpoint is device-agnostic.
+    model = model.cpu()
+    scaler = scaler.to("cpu")
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     checkpoint = {"model_state": model.state_dict(), "scaler": scaler}
     torch.save(checkpoint, RESULTS_DIR / "pinn_v1.pt")

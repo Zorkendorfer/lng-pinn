@@ -16,6 +16,7 @@ from lng_pinn.plots import (
     fig_cost_delta,
     fig_load_shift_heatmap,
     fig_sensitivity,
+    fig_surrogate_eval,
     fig_surrogate_fidelity,
 )
 
@@ -175,10 +176,10 @@ def main() -> None:
 
     surrogate_eval_path = RESULTS_DIR / "surrogate_eval.parquet"
     if surrogate_eval_path.exists():
-        pd.read_parquet(surrogate_eval_path).to_csv(
-            RESULTS_DIR / "surrogate_eval.csv",
-            index=False,
-        )
+        eval_df = pd.read_parquet(surrogate_eval_path)
+        eval_df.to_csv(RESULTS_DIR / "surrogate_eval.csv", index=False)
+        fig_surrogate_eval(eval_df)
+        print("fig5_surrogate_eval.pdf written")
 
     fig_cost_delta(aware_df, blind_df)
     print("fig1_cost_delta.pdf written")

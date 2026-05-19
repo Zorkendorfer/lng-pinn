@@ -26,16 +26,36 @@ PUMP_COL = "W_pump_expected"
 PHYSICS_COLS = ["h_in_per_kg", "h_out_per_kg", PUMP_COL]
 
 
-def _compute_h_in_out_col(comp_np: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Compute h_in (storage) and h_out (send-out) J/kg for each collocation composition."""
-    h_in_list, h_out_list = [], []
+def _compute_h_in_out_col(
+    comp_np: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute h_in, h_out (J/kg) and a valid boolean mask for each collocation composition.
+
+    Compositions that are not liquid at storage conditions (P_IN, T_IN) are marked invalid
+    and get placeholder zeros; the caller should filter them out of X_col.
+    """
+    h_in_list, h_out_list, valid_list = [], [], []
     for comp in tqdm(comp_np, desc="h_in/h_out for collocation", unit="pts"):
-        state = get_state(tuple(float(v) for v in comp))
-        state.update(CP.PT_INPUTS, P_IN, T_IN)
-        h_in_list.append(state.hmolar() / state.molar_mass())
-        state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
-        h_out_list.append(state.hmolar() / state.molar_mass())
-    return np.array(h_in_list, dtype=np.float32), np.array(h_out_list, dtype=np.float32)
+        try:
+            state = get_state(tuple(float(v) for v in comp))
+            state.specify_phase(CP.iphase_liquid)
+            state.update(CP.PT_INPUTS, P_IN, T_IN)
+            h_in = state.hmolar() / state.molar_mass()
+            state.unspecify_phase()
+            state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
+            h_out = state.hmolar() / state.molar_mass()
+            h_in_list.append(h_in)
+            h_out_list.append(h_out)
+            valid_list.append(True)
+        except Exception:
+            h_in_list.append(0.0)
+            h_out_list.append(0.0)
+            valid_list.append(False)
+    return (
+        np.array(h_in_list, dtype=np.float32),
+        np.array(h_out_list, dtype=np.float32),
+        np.array(valid_list, dtype=bool),
+    )
 
 
 def main() -> None:
@@ -127,8 +147,15 @@ def main() -> None:
     print(f"Collocation-training overlap: {overlap:.3%} (should be < 1%)")
 
     # Pre-compute h_in / h_out for collocation points (needed for energy-balance residual)
-    h_in_col_np, h_out_col_np = _compute_h_in_out_col(col_np[:, :6])
-    h_in_col = torch.tensor(h_in_col_np)
+    h_in_col_np, h_out_col_np, valid_mask = _compute_h_in_out_col(col_np[:, :6])
+    n_invalid = int((~valid_mask).sum())
+    if n_invalid:
+        print(f"  Dropping {n_invalid} collocation points not liquid at storage conditions")
+        col_np = col_np[valid_mask]
+        X_col  = X_col[valid_mask]
+        h_in_col_np  = h_in_col_np[valid_mask]
+        h_out_col_np = h_out_col_np[valid_mask]
+    h_in_col  = torch.tensor(h_in_col_np)
     h_out_col = torch.tensor(h_out_col_np)
 
     # -- Train ------------------------------------------------------------------

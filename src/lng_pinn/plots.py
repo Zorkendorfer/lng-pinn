@@ -73,6 +73,22 @@ def fig_load_shift_heatmap(
     plt.close(fig)
 
 
+def fig_surrogate_eval(eval_df: pd.DataFrame) -> None:
+    """Bar chart of per-channel MAE, RMSE, R² from the held-out test split."""
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    for ax, metric in zip(axes, ["MAE", "RMSE", "R2"]):
+        ax.bar(eval_df["channel"], eval_df[metric], color="steelblue")
+        ax.set_title(metric)
+        ax.set_xlabel("Output channel")
+        ax.tick_params(axis="x", rotation=30)
+    axes[0].set_ylabel("Error (physical units)")
+    axes[2].set_ylabel("R²")
+    fig.suptitle("PINN surrogate — held-out test set (10%)")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "fig5_surrogate_eval.pdf")
+    plt.close(fig)
+
+
 def fig_surrogate_fidelity(fidelity_df: pd.DataFrame) -> None:
     """PINN-predicted cost error vs CoolProp ground truth."""
     err_pct = fidelity_df["pinn_cost_eur"] / fidelity_df["true_cost_eur"] - 1.0
