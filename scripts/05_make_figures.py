@@ -90,6 +90,62 @@ def build_yearly_summary(
     return yearly
 
 
+def _eval_true_costs(
+    dispatch_df: pd.DataFrame,
+    ts_df: pd.DataFrame,
+    label: str,
+) -> pd.DataFrame:
+    """Re-evaluate a dispatch schedule through CoolProp to get true costs.
+
+    dispatch_df must have columns: time (index), m_dot, cost_eur.
+    Returns df with added true_cost_eur column, indexed by time.
+    """
+    joined = dispatch_df.join(ts_df, how="inner")
+    true_costs = []
+    for time, row in tqdm(joined.iterrows(), total=len(joined), desc=f"CoolProp {label}", leave=False):
+        composition = tuple(float(row[col]) for col in COMP_COLS)
+        try:
+            out = simulate(composition, float(row["m_dot"]), float(row["T_amb"]), float(row["T_sw"]))
+            true_costs.append(float(row["price_eur_mwh"] * out.W_total * row["m_dot"] * 3600.0 / 1000.0))
+        except ValueError:
+            true_costs.append(np.nan)
+    joined["true_cost_eur"] = true_costs
+    return joined[["m_dot", "cost_eur", "true_cost_eur"]].dropna()
+
+
+def build_true_cost_summary(
+    strategy_dfs: dict[str, pd.DataFrame],
+    ts_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Evaluate all strategies through CoolProp and build yearly true-cost summary."""
+    true_dfs = {}
+    for name, df in strategy_dfs.items():
+        path = RESULTS_DIR / f"true_costs_{name}.parquet"
+        if path.exists():
+            true_dfs[name] = pd.read_parquet(path)
+        else:
+            true_dfs[name] = _eval_true_costs(df, ts_df, name)
+            true_dfs[name].to_parquet(path, index=False)
+
+    yearly = pd.DataFrame({
+        name: true_dfs[name]["true_cost_eur"].resample("YE").sum()
+        for name in strategy_dfs
+    }).dropna()
+
+    # Savings vs each baseline
+    for baseline in ["lagged", "horizon", "constant"]:
+        if baseline in yearly.columns:
+            yearly[f"saving_vs_{baseline}_pct"] = (
+                (yearly[baseline] - yearly["aware"]) / yearly[baseline] * 100
+            )
+
+    yearly = yearly.reset_index()
+    yearly["year"] = pd.to_datetime(yearly["time"], utc=True).dt.year
+    yearly = yearly.drop(columns=["time"])
+    yearly.to_csv(RESULTS_DIR / "yearly_summary_true.csv", index=False)
+    return yearly
+
+
 def build_fidelity_table(
     aware_df: pd.DataFrame,
     ts_df: pd.DataFrame,
@@ -105,25 +161,18 @@ def build_fidelity_table(
     for time, row in tqdm(joined.iterrows(), total=len(joined), desc="Fidelity", unit="pts"):
         composition = tuple(float(row[col]) for col in COMP_COLS)
         try:
-            out = simulate(
-                composition,
-                float(row["m_dot"]),
-                float(row["T_amb"]),
-                float(row["T_sw"]),
-            )
+            out = simulate(composition, float(row["m_dot"]), float(row["T_amb"]), float(row["T_sw"]))
         except ValueError:
             continue
         true_cost = float(row["price_eur_mwh"] * out.W_total * row["m_dot"] * 3600.0 / 1000.0)
-        records.append(
-            {
-                "time": time,
-                "m_dot": float(row["m_dot"]),
-                "pinn_cost_eur": float(row["cost_eur"]),
-                "true_cost_eur": true_cost,
-                "abs_error_eur": float(row["cost_eur"] - true_cost),
-                "rel_error": float(row["cost_eur"] / true_cost - 1.0) if true_cost else np.nan,
-            }
-        )
+        records.append({
+            "time": time,
+            "m_dot": float(row["m_dot"]),
+            "pinn_cost_eur": float(row["cost_eur"]),
+            "true_cost_eur": true_cost,
+            "abs_error_eur": float(row["cost_eur"] - true_cost),
+            "rel_error": float(row["cost_eur"] / true_cost - 1.0) if true_cost else np.nan,
+        })
 
     table = pd.DataFrame(records).dropna()
     table.to_parquet(RESULTS_DIR / "fidelity.parquet", index=False)
@@ -150,29 +199,35 @@ def main() -> None:
         git_sha = "unknown"
     print(f"git_sha={git_sha}")
 
-    aware_df = pd.read_parquet(RESULTS_DIR / "dispatch_v1.parquet")
-    horizon_path = RESULTS_DIR / "baseline_horizon_v1.parquet"
-    annual_path = RESULTS_DIR / "baseline_annual_v1.parquet"
-    constant_path = RESULTS_DIR / "baseline_constant_v1.parquet"
-    blind_path = horizon_path if horizon_path.exists() else RESULTS_DIR / "baseline_v1.parquet"
-    blind_df = pd.read_parquet(blind_path)
-    annual_df = pd.read_parquet(annual_path) if annual_path.exists() else blind_df.copy()
-    constant_df = pd.read_parquet(constant_path) if constant_path.exists() else blind_df.copy()
-    ts_df = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
+    def _load(name: str) -> pd.DataFrame:
+        path = RESULTS_DIR / f"{name}.parquet"
+        df = pd.read_parquet(path)
+        df["time"] = pd.to_datetime(df["time"], utc=True)
+        return df.set_index("time")
 
-    aware_df["time"] = pd.to_datetime(aware_df["time"], utc=True)
-    blind_df["time"] = pd.to_datetime(blind_df["time"], utc=True)
-    annual_df["time"] = pd.to_datetime(annual_df["time"], utc=True)
-    constant_df["time"] = pd.to_datetime(constant_df["time"], utc=True)
-    aware_df = aware_df.set_index("time")
-    blind_df = blind_df.set_index("time")
-    annual_df = annual_df.set_index("time")
-    constant_df = constant_df.set_index("time")
+    aware_df    = _load("dispatch_v1")
+    horizon_df  = _load("baseline_horizon_v1") if (RESULTS_DIR / "baseline_horizon_v1.parquet").exists() else _load("baseline_v1")
+    lagged_df   = _load("baseline_lagged_v1")  if (RESULTS_DIR / "baseline_lagged_v1.parquet").exists()  else horizon_df.copy()
+    annual_df   = _load("baseline_annual_v1")  if (RESULTS_DIR / "baseline_annual_v1.parquet").exists()  else horizon_df.copy()
+    constant_df = _load("baseline_constant_v1") if (RESULTS_DIR / "baseline_constant_v1.parquet").exists() else horizon_df.copy()
+    blind_df    = horizon_df  # keep for backward-compat with existing figure functions
+    ts_df = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
     ts_df.index = pd.to_datetime(ts_df.index, utc=True)
 
     export_csv_tables()
     build_yearly_summary(aware_df, blind_df, annual_df, constant_df)
-    print("yearly_summary.csv written")
+    print("yearly_summary.csv written (PINN costs)")
+
+    # True-cost yearly summary — the honest comparison
+    strategy_dfs = {
+        "aware":    aware_df,
+        "lagged":   lagged_df,
+        "horizon":  horizon_df,
+        "annual":   annual_df,
+        "constant": constant_df,
+    }
+    build_true_cost_summary(strategy_dfs, ts_df)
+    print("yearly_summary_true.csv written (CoolProp true costs)")
 
     surrogate_eval_path = RESULTS_DIR / "surrogate_eval.parquet"
     if surrogate_eval_path.exists():

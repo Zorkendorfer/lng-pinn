@@ -78,6 +78,23 @@ def optimize_constant_flow(
     )
 
 
+def optimize_blind_lagged(
+    horizon_df: pd.DataFrame,
+    model: PINNMLP,
+    scaler: Scaler,
+    demand_kg: float,
+    lagged_composition: pd.Series,
+    inv0: float = 0.5,
+) -> Schedule:
+    """Run dispatch with composition fixed to the value at the start of the window.
+
+    Models the realistic operator assumption: current measured composition is known
+    and held constant for the horizon, without knowing how it will evolve.
+    """
+    blind_df = _with_fixed_composition(horizon_df, lagged_composition)
+    return optimize(blind_df, model, scaler, demand_kg, inv0)
+
+
 def optimize_blind(
     horizon_df: pd.DataFrame,
     model: PINNMLP,

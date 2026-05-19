@@ -14,6 +14,7 @@ from lng_pinn.baseline import (
     COMP_COLS,
     optimize_blind_annual,
     optimize_blind_horizon,
+    optimize_blind_lagged,
     optimize_constant_flow,
 )
 from lng_pinn.composition import CARGO_CYCLE_DAYS
@@ -69,10 +70,11 @@ def main() -> None:
     n_windows = len(starts)
     aware_records: list[dict[str, object]] = []
     horizon_records: list[dict[str, object]] = []
+    lagged_records: list[dict[str, object]] = []
     annual_records: list[dict[str, object]] = []
     constant_records: list[dict[str, object]] = []
     # Start at 85% so max frontloading (3.8%/day) can't drain to infeasibility before first cargo.
-    inv_aware = inv_horizon = inv_annual = inv_constant = 0.85
+    inv_aware = inv_horizon = inv_lagged = inv_annual = inv_constant = 0.85
 
     demand_kg = M_DOT_MAX * 0.6 * H * 3600  # fixed; cargo schedule keeps tanks healthy
 
@@ -81,89 +83,64 @@ def main() -> None:
         if start > 0 and start % CARGO_CYCLE_HOURS == 0:
             inv_aware    = min(0.92, inv_aware    + CARGO_AMOUNT)
             inv_horizon  = min(0.92, inv_horizon  + CARGO_AMOUNT)
+            inv_lagged   = min(0.92, inv_lagged   + CARGO_AMOUNT)
             inv_annual   = min(0.92, inv_annual   + CARGO_AMOUNT)
             inv_constant = min(0.92, inv_constant + CARGO_AMOUNT)
 
         window = ts.iloc[start : start + H]
+        # Lagged composition: what the operator sees at the start of the window.
+        lagged_composition = ts[COMP_COLS].iloc[start]
         record_hours = min(step, len(window))
 
         aware_sched = optimize(window, model, scaler, demand_kg, inv_aware)
         horizon_sched = optimize_blind_horizon(window, model, scaler, demand_kg, inv_horizon)
+        lagged_sched = optimize_blind_lagged(
+            window, model, scaler, demand_kg, lagged_composition, inv_lagged
+        )
         annual_sched = optimize_blind_annual(
-            window,
-            model,
-            scaler,
-            demand_kg,
-            annual_composition,
-            inv_annual,
+            window, model, scaler, demand_kg, annual_composition, inv_annual
         )
         constant_sched = optimize_constant_flow(window, model, scaler, demand_kg, inv_constant)
 
-        _append_records(
-            aware_records,
-            window,
-            aware_sched.m_dot,
-            aware_sched.cost_eur,
-            record_hours,
-        )
-        _append_records(
-            horizon_records,
-            window,
-            horizon_sched.m_dot,
-            horizon_sched.cost_eur,
-            record_hours,
-        )
-        _append_records(
-            annual_records,
-            window,
-            annual_sched.m_dot,
-            annual_sched.cost_eur,
-            record_hours,
-        )
-        _append_records(
-            constant_records,
-            window,
-            constant_sched.m_dot,
-            constant_sched.cost_eur,
-            record_hours,
-        )
+        _append_records(aware_records,    window, aware_sched.m_dot,    aware_sched.cost_eur,    record_hours)
+        _append_records(horizon_records,  window, horizon_sched.m_dot,  horizon_sched.cost_eur,  record_hours)
+        _append_records(lagged_records,   window, lagged_sched.m_dot,   lagged_sched.cost_eur,   record_hours)
+        _append_records(annual_records,   window, annual_sched.m_dot,   annual_sched.cost_eur,   record_hours)
+        _append_records(constant_records, window, constant_sched.m_dot, constant_sched.cost_eur, record_hours)
 
-        inv_aware = float(aware_sched.tank_level[record_hours])
-        inv_horizon = float(horizon_sched.tank_level[record_hours])
-        inv_annual = float(annual_sched.tank_level[record_hours])
+        inv_aware    = float(aware_sched.tank_level[record_hours])
+        inv_horizon  = float(horizon_sched.tank_level[record_hours])
+        inv_lagged   = float(lagged_sched.tank_level[record_hours])
+        inv_annual   = float(annual_sched.tank_level[record_hours])
         inv_constant = float(constant_sched.tank_level[record_hours])
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    aware_df = pd.DataFrame(aware_records)
-    horizon_df = pd.DataFrame(horizon_records)
-    annual_df = pd.DataFrame(annual_records)
+    aware_df    = pd.DataFrame(aware_records)
+    horizon_df  = pd.DataFrame(horizon_records)
+    lagged_df   = pd.DataFrame(lagged_records)
+    annual_df   = pd.DataFrame(annual_records)
     constant_df = pd.DataFrame(constant_records)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     aware_df.to_parquet(RESULTS_DIR / "dispatch_v1.parquet", index=False)
-    horizon_df.to_parquet(
-        RESULTS_DIR / "baseline_horizon_v1.parquet",
-        index=False,
-    )
-    annual_df.to_parquet(
-        RESULTS_DIR / "baseline_annual_v1.parquet",
-        index=False,
-    )
-    constant_df.to_parquet(
-        RESULTS_DIR / "baseline_constant_v1.parquet",
-        index=False,
-    )
+    horizon_df.to_parquet(RESULTS_DIR / "baseline_horizon_v1.parquet", index=False)
+    lagged_df.to_parquet(RESULTS_DIR / "baseline_lagged_v1.parquet", index=False)
+    annual_df.to_parquet(RESULTS_DIR / "baseline_annual_v1.parquet", index=False)
+    constant_df.to_parquet(RESULTS_DIR / "baseline_constant_v1.parquet", index=False)
     horizon_df.to_parquet(RESULTS_DIR / "baseline_v1.parquet", index=False)
 
-    total_aware = float(aware_df["cost_eur"].sum())
-    total_horizon = float(horizon_df["cost_eur"].sum())
-    total_annual = float(annual_df["cost_eur"].sum())
+    def _pct(baseline: float, aware: float) -> str:
+        return f"{(baseline - aware) / baseline * 100:.2f}%"
+
+    total_aware    = float(aware_df["cost_eur"].sum())
+    total_horizon  = float(horizon_df["cost_eur"].sum())
+    total_lagged   = float(lagged_df["cost_eur"].sum())
+    total_annual   = float(annual_df["cost_eur"].sum())
     total_constant = float(constant_df["cost_eur"].sum())
-    print(f"Total aware cost: {total_aware:,.0f} EUR")
-    print(f"Total blind-horizon cost: {total_horizon:,.0f} EUR")
-    print(f"Total blind-annual cost: {total_annual:,.0f} EUR")
-    print(f"Total constant-flow cost: {total_constant:,.0f} EUR")
-    print(f"Saving vs horizon: {(total_horizon - total_aware) / total_horizon * 100:.2f}%")
-    print(f"Saving vs annual: {(total_annual - total_aware) / total_annual * 100:.2f}%")
-    print(f"Saving vs constant: {(total_constant - total_aware) / total_constant * 100:.2f}%")
+    print(f"Total aware cost:          {total_aware:>13,.0f} EUR")
+    print(f"Total blind-lagged cost:   {total_lagged:>13,.0f} EUR  saving={_pct(total_lagged, total_aware)}")
+    print(f"Total blind-horizon cost:  {total_horizon:>13,.0f} EUR  saving={_pct(total_horizon, total_aware)}")
+    print(f"Total blind-annual cost:   {total_annual:>13,.0f} EUR  saving={_pct(total_annual, total_aware)}")
+    print(f"Total constant-flow cost:  {total_constant:>13,.0f} EUR  saving={_pct(total_constant, total_aware)}")
 
 
 if __name__ == "__main__":
