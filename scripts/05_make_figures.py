@@ -1,8 +1,10 @@
 """Generate all paper figures from dispatch results."""
 
 import argparse
+import os
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -90,26 +92,42 @@ def build_yearly_summary(
     return yearly
 
 
+def _eval_one_row(args: tuple) -> float | None:
+    """Top-level helper so ProcessPoolExecutor can pickle it."""
+    composition, m_dot, T_amb, T_sw, price = args
+    try:
+        out = simulate(composition, m_dot, T_amb, T_sw)
+        return float(price * out.W_total * m_dot * 3600.0 / 1000.0)
+    except ValueError:
+        return None
+
+
 def _eval_true_costs(
     dispatch_df: pd.DataFrame,
     ts_df: pd.DataFrame,
     label: str,
 ) -> pd.DataFrame:
-    """Re-evaluate a dispatch schedule through CoolProp to get true costs.
-
-    dispatch_df must have columns: time (index), m_dot, cost_eur.
-    Returns df with added true_cost_eur column, indexed by time.
-    """
+    """Re-evaluate a dispatch schedule through CoolProp to get true costs."""
     joined = dispatch_df.join(ts_df, how="inner")
-    true_costs = []
-    for time, row in tqdm(joined.iterrows(), total=len(joined), desc=f"CoolProp {label}", leave=False):
-        composition = tuple(float(row[col]) for col in COMP_COLS)
-        try:
-            out = simulate(composition, float(row["m_dot"]), float(row["T_amb"]), float(row["T_sw"]))
-            true_costs.append(float(row["price_eur_mwh"] * out.W_total * row["m_dot"] * 3600.0 / 1000.0))
-        except ValueError:
-            true_costs.append(np.nan)
-    joined["true_cost_eur"] = true_costs
+    args = [
+        (
+            tuple(float(row[col]) for col in COMP_COLS),
+            float(row["m_dot"]),
+            float(row["T_amb"]),
+            float(row["T_sw"]),
+            float(row["price_eur_mwh"]),
+        )
+        for _, row in joined.iterrows()
+    ]
+    n_workers = max(1, os.cpu_count() or 1)
+    true_costs: list[float | None] = [None] * len(args)
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_eval_one_row, a): i for i, a in enumerate(args)}
+        for future in tqdm(
+            as_completed(futures), total=len(args), desc=f"CoolProp {label}", leave=False
+        ):
+            true_costs[futures[future]] = future.result()
+    joined["true_cost_eur"] = [v if v is not None else np.nan for v in true_costs]
     return joined[["m_dot", "cost_eur", "true_cost_eur"]].dropna()
 
 
@@ -161,7 +179,9 @@ def build_fidelity_table(
     for time, row in tqdm(joined.iterrows(), total=len(joined), desc="Fidelity", unit="pts"):
         composition = tuple(float(row[col]) for col in COMP_COLS)
         try:
-            out = simulate(composition, float(row["m_dot"]), float(row["T_amb"]), float(row["T_sw"]))
+            out = simulate(
+                composition, float(row["m_dot"]), float(row["T_amb"]), float(row["T_sw"])
+            )
         except ValueError:
             continue
         true_cost = float(row["price_eur_mwh"] * out.W_total * row["m_dot"] * 3600.0 / 1000.0)
@@ -206,10 +226,26 @@ def main() -> None:
         return df.set_index("time")
 
     aware_df    = _load("dispatch_v1")
-    horizon_df  = _load("baseline_horizon_v1") if (RESULTS_DIR / "baseline_horizon_v1.parquet").exists() else _load("baseline_v1")
-    lagged_df   = _load("baseline_lagged_v1")  if (RESULTS_DIR / "baseline_lagged_v1.parquet").exists()  else horizon_df.copy()
-    annual_df   = _load("baseline_annual_v1")  if (RESULTS_DIR / "baseline_annual_v1.parquet").exists()  else horizon_df.copy()
-    constant_df = _load("baseline_constant_v1") if (RESULTS_DIR / "baseline_constant_v1.parquet").exists() else horizon_df.copy()
+    horizon_df = (
+        _load("baseline_horizon_v1")
+        if (RESULTS_DIR / "baseline_horizon_v1.parquet").exists()
+        else _load("baseline_v1")
+    )
+    lagged_df = (
+        _load("baseline_lagged_v1")
+        if (RESULTS_DIR / "baseline_lagged_v1.parquet").exists()
+        else horizon_df.copy()
+    )
+    annual_df = (
+        _load("baseline_annual_v1")
+        if (RESULTS_DIR / "baseline_annual_v1.parquet").exists()
+        else horizon_df.copy()
+    )
+    constant_df = (
+        _load("baseline_constant_v1")
+        if (RESULTS_DIR / "baseline_constant_v1.parquet").exists()
+        else horizon_df.copy()
+    )
     blind_df    = horizon_df  # keep for backward-compat with existing figure functions
     ts_df = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
     ts_df.index = pd.to_datetime(ts_df.index, utc=True)

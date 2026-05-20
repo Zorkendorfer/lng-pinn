@@ -102,11 +102,21 @@ def main() -> None:
         )
         constant_sched = optimize_constant_flow(window, model, scaler, demand_kg, inv_constant)
 
-        _append_records(aware_records,    window, aware_sched.m_dot,    aware_sched.cost_eur,    record_hours)
-        _append_records(horizon_records,  window, horizon_sched.m_dot,  horizon_sched.cost_eur,  record_hours)
-        _append_records(lagged_records,   window, lagged_sched.m_dot,   lagged_sched.cost_eur,   record_hours)
-        _append_records(annual_records,   window, annual_sched.m_dot,   annual_sched.cost_eur,   record_hours)
-        _append_records(constant_records, window, constant_sched.m_dot, constant_sched.cost_eur, record_hours)
+        _append_records(
+            aware_records, window, aware_sched.m_dot, aware_sched.cost_eur, record_hours
+        )
+        _append_records(
+            horizon_records, window, horizon_sched.m_dot, horizon_sched.cost_eur, record_hours
+        )
+        _append_records(
+            lagged_records, window, lagged_sched.m_dot, lagged_sched.cost_eur, record_hours
+        )
+        _append_records(
+            annual_records, window, annual_sched.m_dot, annual_sched.cost_eur, record_hours
+        )
+        _append_records(
+            constant_records, window, constant_sched.m_dot, constant_sched.cost_eur, record_hours
+        )
 
         inv_aware    = float(aware_sched.tank_level[record_hours])
         inv_horizon  = float(horizon_sched.tank_level[record_hours])
@@ -136,11 +146,12 @@ def main() -> None:
     total_lagged   = float(lagged_df["cost_eur"].sum())
     total_annual   = float(annual_df["cost_eur"].sum())
     total_constant = float(constant_df["cost_eur"].sum())
-    print(f"Total aware cost:          {total_aware:>13,.0f} EUR")
-    print(f"Total blind-lagged cost:   {total_lagged:>13,.0f} EUR  saving={_pct(total_lagged, total_aware)}")
-    print(f"Total blind-horizon cost:  {total_horizon:>13,.0f} EUR  saving={_pct(total_horizon, total_aware)}")
-    print(f"Total blind-annual cost:   {total_annual:>13,.0f} EUR  saving={_pct(total_annual, total_aware)}")
-    print(f"Total constant-flow cost:  {total_constant:>13,.0f} EUR  saving={_pct(total_constant, total_aware)}")
+    print(f"Total aware cost:         {total_aware:>13,.0f} EUR")
+    print(f"Total blind-lagged:   {total_lagged:>13,.0f} EUR  {_pct(total_lagged, total_aware)}")
+    print(f"Total blind-horizon:  {total_horizon:>13,.0f} EUR  {_pct(total_horizon, total_aware)}")
+    print(f"Total blind-annual:   {total_annual:>13,.0f} EUR  {_pct(total_annual, total_aware)}")
+    pct_const = _pct(total_constant, total_aware)
+    print(f"Total constant-flow:  {total_constant:>13,.0f} EUR  {pct_const}")
 
 
 if __name__ == "__main__":

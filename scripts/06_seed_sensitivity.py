@@ -8,7 +8,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
@@ -62,8 +61,12 @@ def _run_backtest(
         n = min(step, len(window))
 
         a_sched = optimize(window, model, scaler, demand_kg, inv_aware)  # type: ignore[arg-type]
-        l_sched = optimize_blind_lagged(window, model, scaler, demand_kg, lagged_composition, inv_lagged)  # type: ignore[arg-type]
-        h_sched = optimize_blind_horizon(window, model, scaler, demand_kg, inv_horizon)  # type: ignore[arg-type]
+        l_sched = optimize_blind_lagged(  # type: ignore[arg-type]
+            window, model, scaler, demand_kg, lagged_composition, inv_lagged
+        )
+        h_sched = optimize_blind_horizon(  # type: ignore[arg-type]
+            window, model, scaler, demand_kg, inv_horizon
+        )
 
         for t, row in enumerate(window.iloc[:n].itertuples()):
             aware_records.append({"time": row.Index, "cost_eur": float(a_sched.cost_eur[t])})
@@ -107,13 +110,23 @@ def main() -> None:
                 "aware_eur":          float(yearly_aware[ts_end]),
                 "blind_lagged_eur":   float(yearly_lagged[ts_end]),
                 "blind_horizon_eur":  float(yearly_horizon[ts_end]),
-                "saving_vs_lagged_pct":  float((yearly_lagged[ts_end]  - yearly_aware[ts_end]) / yearly_lagged[ts_end]  * 100),
-                "saving_vs_horizon_pct": float((yearly_horizon[ts_end] - yearly_aware[ts_end]) / yearly_horizon[ts_end] * 100),
+                "saving_vs_lagged_pct": float(
+                    (yearly_lagged[ts_end] - yearly_aware[ts_end]) / yearly_lagged[ts_end] * 100
+                ),
+                "saving_vs_horizon_pct": float(
+                    (yearly_horizon[ts_end] - yearly_aware[ts_end]) / yearly_horizon[ts_end] * 100
+                ),
             })
 
-        total_lagged_pct  = (lagged_df["cost_eur"].sum()  - aware_df["cost_eur"].sum()) / lagged_df["cost_eur"].sum()  * 100
-        total_horizon_pct = (horizon_df["cost_eur"].sum() - aware_df["cost_eur"].sum()) / horizon_df["cost_eur"].sum() * 100
-        print(f"  seed={seed}  vs lagged={total_lagged_pct:.2f}%  vs horizon={total_horizon_pct:.2f}%")
+        total_lagged_pct = (
+            (lagged_df["cost_eur"].sum() - aware_df["cost_eur"].sum())
+            / lagged_df["cost_eur"].sum() * 100
+        )
+        total_horizon_pct = (
+            (horizon_df["cost_eur"].sum() - aware_df["cost_eur"].sum())
+            / horizon_df["cost_eur"].sum() * 100
+        )
+        print(f"  seed={seed}  lagged={total_lagged_pct:.2f}%  horizon={total_horizon_pct:.2f}%")
 
     results_df = pd.DataFrame(all_records)
 
@@ -130,7 +143,8 @@ def main() -> None:
     seed_totals = results_df.groupby("seed")["saving_vs_lagged_pct"].mean()
     overall_mean = float(seed_totals.mean())
     overall_std = float(seed_totals.std())
-    print(f"\nOverall saving vs lagged:  {overall_mean:.2f}% ± {overall_std:.2f}%  (n={len(SEEDS)} seeds)")
+    n = len(SEEDS)
+    print(f"\nOverall saving vs lagged:  {overall_mean:.2f}% ± {overall_std:.2f}%  (n={n} seeds)")
     h_totals = results_df.groupby("seed")["saving_vs_horizon_pct"].mean()
     print(f"Overall saving vs horizon: {h_totals.mean():.2f}% ± {h_totals.std():.2f}%")
 

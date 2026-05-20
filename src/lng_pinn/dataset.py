@@ -30,6 +30,11 @@ BOUNDS = {
     "T_sw": (271.0, 298.0),  # K
 }
 
+# Stratified sampling: concentrate extra points at low flow where PINN error is highest.
+# 30% of samples drawn from m_dot ∈ [M_DOT_MIN, LOW_MDOT_MAX]; rest from full range.
+LOW_MDOT_FRAC = 0.30
+LOW_MDOT_MAX = 25.0  # kg/s
+
 
 def _sample_compositions(lhs_cols: np.ndarray) -> np.ndarray:
     """Map first 5 LHS columns to valid mole fractions (sum-to-1 constrained)."""
@@ -110,23 +115,39 @@ def build_training_set(
     seed: int = 0,
     workers: int | None = None,
 ) -> pd.DataFrame:
-    """Sample N operating points via LHS, simulate in parallel, return DataFrame.
+    """Sample N operating points via stratified LHS, simulate in parallel, return DataFrame.
 
     Columns: CH4, C2H6, C3H8, nC4H10, iC4H10, N2, m_dot, T_amb, T_sw,
              W_pump, W_trim, W_total, T_out, Q_sw, exergy_destruction,
              h_in_per_kg, h_out_per_kg, W_pump_expected
-    """
-    sampler = LatinHypercube(d=8, seed=seed)
-    samples = sampler.random(N)
 
-    compositions = _sample_compositions(samples[:, :5])
-    m_dot = BOUNDS["m_dot"][0] + samples[:, 5] * (BOUNDS["m_dot"][1] - BOUNDS["m_dot"][0])
-    T_amb = BOUNDS["T_amb"][0] + samples[:, 6] * (BOUNDS["T_amb"][1] - BOUNDS["T_amb"][0])
-    T_sw = BOUNDS["T_sw"][0] + samples[:, 7] * (BOUNDS["T_sw"][1] - BOUNDS["T_sw"][0])
+    Sampling strategy: LOW_MDOT_FRAC of points are drawn from m_dot ∈ [M_DOT_MIN,
+    LOW_MDOT_MAX] to reduce PINN error in the low-flow regime used heavily by dispatch.
+    """
+    m_lo, m_hi = BOUNDS["m_dot"]
+    N_low = int(N * LOW_MDOT_FRAC)
+    N_main = N - N_low
+
+    s_main = LatinHypercube(d=8, seed=seed).random(N_main)
+    comp_main = _sample_compositions(s_main[:, :5])
+    m_dot_main = m_lo + s_main[:, 5] * (m_hi - m_lo)
+    T_amb_main = BOUNDS["T_amb"][0] + s_main[:, 6] * (BOUNDS["T_amb"][1] - BOUNDS["T_amb"][0])
+    T_sw_main = BOUNDS["T_sw"][0] + s_main[:, 7] * (BOUNDS["T_sw"][1] - BOUNDS["T_sw"][0])
+
+    s_low = LatinHypercube(d=8, seed=seed + 1).random(N_low)
+    comp_low = _sample_compositions(s_low[:, :5])
+    m_dot_low = m_lo + s_low[:, 5] * (LOW_MDOT_MAX - m_lo)
+    T_amb_low = BOUNDS["T_amb"][0] + s_low[:, 6] * (BOUNDS["T_amb"][1] - BOUNDS["T_amb"][0])
+    T_sw_low = BOUNDS["T_sw"][0] + s_low[:, 7] * (BOUNDS["T_sw"][1] - BOUNDS["T_sw"][0])
+
+    compositions = np.vstack([comp_main, comp_low])
+    m_dot = np.concatenate([m_dot_main, m_dot_low])
+    T_amb = np.concatenate([T_amb_main, T_amb_low])
+    T_sw = np.concatenate([T_sw_main, T_sw_low])
 
     args = [(tuple(compositions[i]), m_dot[i], T_amb[i], T_sw[i]) for i in range(N)]
 
-    n_workers = workers or max(1, min(4, os.cpu_count() or 1))
+    n_workers = workers or max(1, (os.cpu_count() or 1))
     if n_workers == 1:
         raw = [_simulate_one(arg) for arg in tqdm(args, total=N, desc="Simulating", unit="pts")]
     else:
