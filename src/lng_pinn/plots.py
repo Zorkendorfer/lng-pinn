@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 
@@ -12,6 +13,39 @@ FIG_DIR = Path("results/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
 sns.set_theme(style="whitegrid", palette="muted")
+
+
+def fig_carbon_sweep(sweep_df: pd.DataFrame) -> None:
+    """v1.3 headline figure: aware-vs-horizon true-cost saving vs CO2 price.
+
+    ``sweep_df`` has columns: price_co2_eur_per_t, year, saving_vs_horizon_pct.
+    One line per year + a mean line. Annotates the €80/tCO2 EU-ETS point.
+    """
+    years = sorted(sweep_df["year"].unique())
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for year in years:
+        sub = sweep_df[sweep_df["year"] == year].sort_values("price_co2_eur_per_t")
+        ax.plot(
+            sub["price_co2_eur_per_t"], sub["saving_vs_horizon_pct"],
+            marker="o", linewidth=1.4, label=str(year), alpha=0.65,
+        )
+    mean = sweep_df.groupby("price_co2_eur_per_t")["saving_vs_horizon_pct"].mean()
+    ax.plot(
+        mean.index, mean.values,
+        color="black", linewidth=2.3, marker="s", label="mean", zorder=10,
+    )
+    if 80.0 in mean.index:
+        ax.axvline(80.0, color="firebrick", linestyle="--", alpha=0.5)
+        ax.text(82, ax.get_ylim()[1] * 0.92, "EU ETS\n(~€80/tCO₂)",
+                color="firebrick", fontsize=9, va="top")
+    ax.axhline(0.0, color="grey", linewidth=0.8)
+    ax.set_xlabel("Carbon price (EUR/tCO₂)")
+    ax.set_ylabel("Aware vs horizon-blind saving (%)")
+    ax.set_title("Composition-aware dispatch saving vs carbon price")
+    ax.legend(loc="best", fontsize=9, ncol=2)
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "fig6_carbon_sweep.pdf")
+    plt.close(fig)
 
 
 def fig_cost_delta(

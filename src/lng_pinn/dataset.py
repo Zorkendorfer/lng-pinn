@@ -245,6 +245,52 @@ def build_training_set(
     return df
 
 
+def append_trajectory_rows(
+    rows: list[dict],
+    dedupe_tol: float = 1e-4,
+) -> int:
+    """v1.3 A2: append trajectory-labelled rows to data/processed/train.parquet.
+
+    ``rows`` is the list of dicts produced by ``_simulate_one`` for points
+    sampled on the dispatch trajectory. Each row is tagged with
+    ``_source="trajectory"``. Rows whose (composition, m_dot, T_amb, T_sw)
+    are within ``dedupe_tol`` of an existing row in the training set are
+    skipped — LHS already covers most of the input space, so we only want
+    to add genuinely new points.
+
+    Returns the number of rows actually appended after deduplication.
+    """
+    train_path = PROCESSED_DIR / "train.parquet"
+    if not train_path.exists():
+        raise SystemExit(
+            f"{train_path} does not exist; run scripts/02_build_dataset.py first."
+        )
+    existing = pd.read_parquet(train_path)
+    if "_source" not in existing.columns:
+        existing["_source"] = "lhs"
+
+    new_df = pd.DataFrame(rows)
+    new_df["_source"] = "trajectory"
+
+    key_cols = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2", "m_dot", "T_amb", "T_sw"]
+    # Round to a tolerance bucket so near-duplicates collapse.
+    decimals = max(0, int(round(-np.log10(dedupe_tol))))
+    existing_keys = {tuple(np.round(existing[key_cols].values[i], decimals)) for i in range(len(existing))}
+    keep_mask = np.array([
+        tuple(np.round(new_df[key_cols].values[i], decimals)) not in existing_keys
+        for i in range(len(new_df))
+    ])
+    new_df = new_df.loc[keep_mask].reset_index(drop=True)
+    if len(new_df) == 0:
+        return 0
+
+    combined = pd.concat([existing, new_df], ignore_index=True)
+    tmp = train_path.with_suffix(".parquet.tmp")
+    combined.to_parquet(tmp, index=False)
+    tmp.replace(train_path)
+    return int(len(new_df))
+
+
 def build_timeseries(
     start: str = "2021-01-01",
     end: str = "2024-01-01",
