@@ -58,6 +58,9 @@ def _compute_h_in_out_col(
     )
 
 
+COLL_LHS_SEED = 99  # collocation-point LHS seed; cache is keyed by (n_col, seed)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=50_000)
@@ -76,7 +79,27 @@ def main() -> None:
         "--lambda-p", type=float, default=1.0, help="Weight for pump-work physics loss"
     )
     parser.add_argument("--patience", type=int, default=2000, help="Early-stop patience in steps")
+    parser.add_argument(
+        "--no-early-stop",
+        action="store_true",
+        help="Disable early stopping (overrides --patience). Lets training run the full --steps.",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Ignore any existing pinn_v1.ckpt and start from step 0.",
+    )
+    parser.add_argument(
+        "--ckpt-every",
+        type=int,
+        default=None,
+        help="Save a full-state checkpoint every K steps (default: n_steps // 20).",
+    )
     args = parser.parse_args()
+
+    # `--no-early-stop` is sugar for an unreachable patience target.
+    if args.no_early_stop:
+        args.patience = args.steps + 1
 
     try:
         git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
@@ -129,7 +152,7 @@ def main() -> None:
     print("Generating LHS collocation points...")
     from scipy.stats.qmc import LatinHypercube
 
-    sampler = LatinHypercube(d=8, seed=99)
+    sampler = LatinHypercube(d=8, seed=COLL_LHS_SEED)
     col_lhs = sampler.random(args.n_col).astype(np.float32)
     col_comp = _sample_compositions(col_lhs[:, :5])
     col_m = BOUNDS["m_dot"][0] + col_lhs[:, 5] * (BOUNDS["m_dot"][1] - BOUNDS["m_dot"][0])
@@ -146,8 +169,30 @@ def main() -> None:
     overlap = len(col_set & train_set) / len(col_set)
     print(f"Collocation-training overlap: {overlap:.3%} (should be < 1%)")
 
-    # Pre-compute h_in / h_out for collocation points (needed for energy-balance residual)
-    h_in_col_np, h_out_col_np, valid_mask = _compute_h_in_out_col(col_np[:, :6])
+    # Pre-compute h_in / h_out for collocation points (needed for energy-balance residual).
+    # Cache keyed by (n_col, COLL_LHS_SEED) — the LHS draws are deterministic from those.
+    coll_cache = PROCESSED_DIR / f"collocation_h_n{args.n_col}_s{COLL_LHS_SEED}.parquet"
+    if coll_cache.exists():
+        try:
+            cached = pd.read_parquet(coll_cache)
+            if len(cached) == args.n_col and {"h_in", "h_out", "valid"} <= set(cached.columns):
+                print(f"  Reusing cached collocation enthalpies from {coll_cache.name}")
+                h_in_col_np = cached["h_in"].values.astype(np.float32)
+                h_out_col_np = cached["h_out"].values.astype(np.float32)
+                valid_mask = cached["valid"].values.astype(bool)
+            else:
+                print(f"  Cache {coll_cache.name} shape/columns mismatch, recomputing")
+                h_in_col_np, h_out_col_np, valid_mask = _compute_h_in_out_col(col_np[:, :6])
+        except Exception as exc:
+            print(f"  Could not read {coll_cache.name}: {exc}; recomputing")
+            h_in_col_np, h_out_col_np, valid_mask = _compute_h_in_out_col(col_np[:, :6])
+    else:
+        h_in_col_np, h_out_col_np, valid_mask = _compute_h_in_out_col(col_np[:, :6])
+        pd.DataFrame(
+            {"h_in": h_in_col_np, "h_out": h_out_col_np, "valid": valid_mask}
+        ).to_parquet(coll_cache, index=False)
+        print(f"  Cached collocation enthalpies to {coll_cache.name}")
+
     n_invalid = int((~valid_mask).sum())
     if n_invalid:
         print(f"  Dropping {n_invalid} collocation points not liquid at storage conditions")
@@ -175,6 +220,8 @@ def main() -> None:
         lambda_energy=args.lambda_e,
         lambda_pump=args.lambda_p,
         patience=args.patience,
+        resume=not args.no_resume,
+        ckpt_every=args.ckpt_every,
     )
     print("Checkpoint saved to results/models/pinn_v1.pt")
 

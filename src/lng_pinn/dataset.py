@@ -110,19 +110,11 @@ def _simulate_one(args: tuple[Any, ...]) -> dict[str, float] | None:
     }
 
 
-def build_training_set(
-    N: int = 20_000,
-    seed: int = 0,
-    workers: int | None = None,
-) -> pd.DataFrame:
-    """Sample N operating points via stratified LHS, simulate in parallel, return DataFrame.
+def _generate_sample_args(N: int, seed: int) -> list[tuple[Any, ...]]:
+    """Deterministically generate the N stratified-LHS operating-point arguments.
 
-    Columns: CH4, C2H6, C3H8, nC4H10, iC4H10, N2, m_dot, T_amb, T_sw,
-             W_pump, W_trim, W_total, T_out, Q_sw, exergy_destruction,
-             h_in_per_kg, h_out_per_kg, W_pump_expected
-
-    Sampling strategy: LOW_MDOT_FRAC of points are drawn from m_dot ∈ [M_DOT_MIN,
-    LOW_MDOT_MAX] to reduce PINN error in the low-flow regime used heavily by dispatch.
+    Given the same (N, seed), this returns identical arguments — that determinism is
+    what lets `build_training_set` resume safely from a partial checkpoint.
     """
     m_lo, m_hi = BOUNDS["m_dot"]
     N_low = int(N * LOW_MDOT_FRAC)
@@ -145,19 +137,93 @@ def build_training_set(
     T_amb = np.concatenate([T_amb_main, T_amb_low])
     T_sw = np.concatenate([T_sw_main, T_sw_low])
 
-    args = [(tuple(compositions[i]), m_dot[i], T_amb[i], T_sw[i]) for i in range(N)]
+    return [(tuple(compositions[i]), m_dot[i], T_amb[i], T_sw[i]) for i in range(N)]
 
-    n_workers = workers or max(1, (os.cpu_count() or 1))
-    if n_workers == 1:
-        raw = [_simulate_one(arg) for arg in tqdm(args, total=N, desc="Simulating", unit="pts")]
-    else:
-        raw = []
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            futures = [executor.submit(_simulate_one, arg) for arg in args]
-            for future in tqdm(as_completed(futures), total=N, desc="Simulating", unit="pts"):
-                raw.append(future.result())
 
-    records = [r for r in raw if r is not None]
+def _write_partial(records: dict[int, dict[str, float]], path: Path) -> None:
+    """Atomic write of the per-id records dict to a parquet checkpoint."""
+    if not records:
+        return
+    df = pd.DataFrame([records[i] for i in sorted(records.keys())])
+    tmp = path.with_suffix(".parquet.tmp")
+    df.to_parquet(tmp, index=False)
+    tmp.replace(path)
+
+
+def build_training_set(
+    N: int = 20_000,
+    seed: int = 0,
+    workers: int | None = None,
+    resume: bool = True,
+    ckpt_every: int = 2000,
+) -> pd.DataFrame:
+    """Sample N operating points via stratified LHS, simulate in parallel, return DataFrame.
+
+    Columns: CH4, C2H6, C3H8, nC4H10, iC4H10, N2, m_dot, T_amb, T_sw,
+             W_pump, W_trim, W_total, T_out, Q_sw, exergy_destruction,
+             h_in_per_kg, h_out_per_kg, W_pump_expected
+
+    Sampling strategy: LOW_MDOT_FRAC of points are drawn from m_dot ∈ [M_DOT_MIN,
+    LOW_MDOT_MAX] to reduce PINN error in the low-flow regime used heavily by dispatch.
+
+    Resume behaviour: a per-(N, seed) partial parquet is flushed every `ckpt_every`
+    completed samples. If the process is killed and rerun with the same (N, seed),
+    the partial is loaded and only the missing sample IDs are submitted to the pool.
+    The partial file is removed once the final train.parquet is written.
+    """
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    partial_path = PROCESSED_DIR / f"train_partial_N{N}_s{seed}.parquet"
+
+    args = _generate_sample_args(N, seed)
+
+    # Resume: load any prior records (keyed by deterministic sample id 0..N-1).
+    done: dict[int, dict[str, float]] = {}
+    if resume and partial_path.exists():
+        try:
+            prior = pd.read_parquet(partial_path)
+            if "_sample_id" in prior.columns:
+                for rec in prior.to_dict(orient="records"):
+                    sid = int(rec.pop("_sample_id"))
+                    done[sid] = rec
+                print(f"  Resuming from {partial_path.name}: {len(done)}/{N} samples cached")
+            else:
+                print(f"  Ignoring {partial_path.name}: missing _sample_id column")
+        except Exception as exc:
+            print(f"  Could not resume from {partial_path.name}: {exc}")
+
+    pending = [(i, args[i]) for i in range(N) if i not in done]
+
+    if pending:
+        n_workers = workers or max(1, (os.cpu_count() or 1))
+        completed_since_ckpt = 0
+
+        def _record_result(sid: int, rec: dict[str, float] | None) -> None:
+            nonlocal completed_since_ckpt
+            if rec is not None:
+                rec["_sample_id"] = sid
+                done[sid] = rec
+            completed_since_ckpt += 1
+            if completed_since_ckpt >= ckpt_every:
+                _write_partial(done, partial_path)
+                completed_since_ckpt = 0
+
+        desc = f"Simulating ({len(pending)} new)"
+        if n_workers == 1:
+            for sid, arg in tqdm(pending, total=len(pending), desc=desc, unit="pts"):
+                _record_result(sid, _simulate_one(arg))
+        else:
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                future_to_id = {executor.submit(_simulate_one, a): sid for sid, a in pending}
+                for future in tqdm(
+                    as_completed(future_to_id), total=len(pending), desc=desc, unit="pts"
+                ):
+                    sid = future_to_id[future]
+                    _record_result(sid, future.result())
+
+        # Final flush so the partial reflects everything we just computed.
+        _write_partial(done, partial_path)
+
+    records = [done[i] for i in sorted(done.keys())]
     n_skipped = N - len(records)
     if n_skipped:
         import warnings
@@ -168,8 +234,14 @@ def build_training_set(
         )
 
     df = pd.DataFrame(records)
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    if "_sample_id" in df.columns:
+        df = df.drop(columns=["_sample_id"])
     df.to_parquet(PROCESSED_DIR / "train.parquet", index=False)
+
+    # Clean up partial once final is on disk.
+    if partial_path.exists():
+        partial_path.unlink()
+
     return df
 
 

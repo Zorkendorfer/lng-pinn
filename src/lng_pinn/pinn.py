@@ -12,6 +12,8 @@ from torch import Tensor
 from tqdm import tqdm
 
 RESULTS_DIR = Path("results/models")
+CKPT_PATH = RESULTS_DIR / "pinn_v1.ckpt"
+FINAL_PATH = RESULTS_DIR / "pinn_v1.pt"
 
 INPUT_DIM = 9  # CH4, C2H6, C3H8, nC4, iC4, N2, m_dot, T_amb, T_sw
 OUTPUT_DIM = 4  # W_pump, W_total, T_out, exergy_destruction
@@ -128,6 +130,49 @@ def pump_work_residual(
     return ((y[:, 0] - W_pump_expected) / (W_pump_expected + 1e-8)).pow(2).mean()
 
 
+def _save_ckpt(
+    path: Path,
+    *,
+    model: PINNMLP,
+    optimizer: optim.Optimizer,
+    scheduler: optim.lr_scheduler.LRScheduler,
+    scaler: Scaler,
+    step: int,
+    n_steps: int,
+    best_val_loss: float,
+    best_state: dict[str, Tensor] | None,
+    steps_since_improvement: int,
+    done: bool,
+    device: torch.device,
+) -> None:
+    """Atomic write of the full training-state checkpoint."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ckpt: dict[str, Any] = {
+        "model_state": {k: v.cpu().clone() for k, v in model.state_dict().items()},
+        "optimizer_state": optimizer.state_dict(),
+        "scheduler_state": scheduler.state_dict(),
+        "scaler": scaler.to("cpu"),
+        "step": step,
+        "n_steps": n_steps,
+        "best_val_loss": best_val_loss,
+        "best_state": best_state,
+        "steps_since_improvement": steps_since_improvement,
+        "done": done,
+        "torch_rng_state": torch.get_rng_state(),
+    }
+    if device.type == "cuda":
+        ckpt["cuda_rng_state"] = torch.cuda.get_rng_state()
+    tmp = path.with_suffix(".ckpt.tmp")
+    torch.save(ckpt, tmp)
+    tmp.replace(path)
+
+
+def _load_ckpt(path: Path, device: torch.device) -> dict[str, Any]:
+    """Load a training-state checkpoint. weights_only=False because we trust our own file."""
+    with torch.serialization.safe_globals([Scaler]):
+        return torch.load(path, map_location=device, weights_only=False)
+
+
 def train(
     X_train: Tensor,
     y_train: Tensor,
@@ -146,6 +191,8 @@ def train(
     lambda_pump: float = 1.0,
     val_every: int = 500,
     patience: int = 2000,
+    resume: bool = True,
+    ckpt_every: int | None = None,
 ) -> PINNMLP:
     """Train the PINN surrogate.
 
@@ -158,7 +205,12 @@ def train(
         W_pump_expected:  (N,) kWh/kg - analytical pump work for training points.
         scaler:           Scaler used to normalise X and y.
         X_val, y_val:     Optional validation set for early stopping.
-        patience:         Steps without val improvement before stopping.
+        patience:         Steps without val improvement before stopping. Pass a very
+                          large value (e.g. n_steps + 1) to effectively disable.
+        resume:           If True and a `pinn_v1.ckpt` exists, restore model, optimizer,
+                          scheduler, RNG, and step counter, then continue.
+        ckpt_every:       Save a full-state checkpoint every K steps. Defaults to
+                          max(1, n_steps // 20) — i.e. roughly 20 checkpoints per run.
     """
     device = _device()
     model = PINNMLP()
@@ -178,12 +230,67 @@ def train(
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_steps, eta_min=1e-5)
 
+    if ckpt_every is None:
+        ckpt_every = max(1, n_steps // 20)
+
+    start_step = 0
     best_val_loss = float("inf")
     best_state: dict[str, Tensor] | None = None
     steps_since_improvement = 0
 
-    pbar = tqdm(range(n_steps), desc="Training PINN", unit="step")
+    # ---- Resume from checkpoint if present ----------------------------------------
+    if resume and CKPT_PATH.exists():
+        try:
+            ckpt = _load_ckpt(CKPT_PATH, device)
+            stored_n_steps = ckpt.get("n_steps", n_steps)
+            if stored_n_steps != n_steps:
+                print(
+                    f"  WARN: checkpoint was set up for {stored_n_steps} total steps, "
+                    f"now requested {n_steps}. Scheduler curve will not match a "
+                    "from-scratch run exactly."
+                )
+            model.load_state_dict(ckpt["model_state"])
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+            scheduler.load_state_dict(ckpt["scheduler_state"])
+            start_step = int(ckpt["step"])
+            best_val_loss = float(ckpt["best_val_loss"])
+            best_state = ckpt.get("best_state")
+            steps_since_improvement = int(ckpt.get("steps_since_improvement", 0))
+            torch.set_rng_state(ckpt["torch_rng_state"].cpu())
+            if device.type == "cuda" and "cuda_rng_state" in ckpt:
+                torch.cuda.set_rng_state(ckpt["cuda_rng_state"].cpu())
+            print(
+                f"  Resumed from {CKPT_PATH.name}: step {start_step}/{n_steps}, "
+                f"best val_loss={best_val_loss:.4e}, since_improvement={steps_since_improvement}"
+            )
+            if ckpt.get("done") or start_step >= n_steps:
+                print("  Checkpoint marks training complete — restoring best weights and returning.")
+                if best_state is not None:
+                    model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+                model = model.cpu()
+                scaler_cpu = scaler.to("cpu")
+                FINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+                torch.save({"model_state": model.state_dict(), "scaler": scaler_cpu}, FINAL_PATH)
+                return model
+        except Exception as exc:
+            print(f"  Could not resume from {CKPT_PATH.name}: {exc}; starting from step 0")
+            start_step = 0
+            best_val_loss = float("inf")
+            best_state = None
+            steps_since_improvement = 0
+
+    # ---- Training loop ------------------------------------------------------------
+    early_stopped = False
+    pbar = tqdm(
+        range(start_step, n_steps),
+        desc="Training PINN",
+        unit="step",
+        initial=start_step,
+        total=n_steps,
+    )
+    last_step = start_step
     for step in pbar:
+        last_step = step
         idx_d = torch.randint(len(X_train), (batch_size,), device=device)
         idx_c = torch.randint(len(X_col),   (batch_size,), device=device)
 
@@ -225,21 +332,44 @@ def train(
                 steps_since_improvement += val_every
             if steps_since_improvement >= patience:
                 pbar.set_description(f"Early stop at step {step}")
+                early_stopped = True
                 break
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
+        # Periodic full-state checkpoint
+        if (step + 1) % ckpt_every == 0:
+            _save_ckpt(
+                CKPT_PATH,
+                model=model, optimizer=optimizer, scheduler=scheduler, scaler=scaler,
+                step=step + 1, n_steps=n_steps,
+                best_val_loss=best_val_loss, best_state=best_state,
+                steps_since_improvement=steps_since_improvement,
+                done=False, device=device,
+            )
 
-    # Move everything to CPU before saving so the checkpoint is device-agnostic.
+    if best_state is not None:
+        model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+
+    # Final checkpoint marks the run as complete so a future call returns immediately.
+    _save_ckpt(
+        CKPT_PATH,
+        model=model, optimizer=optimizer, scheduler=scheduler, scaler=scaler,
+        step=last_step + 1, n_steps=n_steps,
+        best_val_loss=best_val_loss, best_state=best_state,
+        steps_since_improvement=steps_since_improvement,
+        done=True, device=device,
+    )
+
+    # Inference-only checkpoint for downstream scripts.
     model = model.cpu()
-    scaler = scaler.to("cpu")
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    checkpoint = {"model_state": model.state_dict(), "scaler": scaler}
-    torch.save(checkpoint, RESULTS_DIR / "pinn_v1.pt")
+    scaler_cpu = scaler.to("cpu")
+    FINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model_state": model.state_dict(), "scaler": scaler_cpu}, FINAL_PATH)
+    if early_stopped:
+        print(f"  Early stop fired at step {last_step}; checkpoint marked done.")
     return model
 
 
-def load(path: str | Path = RESULTS_DIR / "pinn_v1.pt") -> tuple[PINNMLP, Scaler]:
+def load(path: str | Path = FINAL_PATH) -> tuple[PINNMLP, Scaler]:
     with torch.serialization.safe_globals([Scaler]):
         checkpoint: dict[str, Any] = torch.load(path, map_location="cpu")
     scaler: Scaler = checkpoint["scaler"]
