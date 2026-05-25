@@ -104,13 +104,28 @@ def build_yearly_summary(
 
 
 def _eval_one_row(args: tuple) -> float | None:
-    """Top-level helper so ProcessPoolExecutor can pickle it."""
-    composition, m_dot, T_amb, T_sw, price = args
+    """Top-level helper so ProcessPoolExecutor can pickle it.
+
+    Returns the true total cost per hour: electricity + carbon. The 6-tuple
+    form (with carbon_price) is the v1.3 default; older 5-tuples (no carbon)
+    are still accepted for cache compatibility.
+    """
+    if len(args) == 6:
+        composition, m_dot, T_amb, T_sw, price, carbon_price = args
+    else:
+        composition, m_dot, T_amb, T_sw, price = args
+        carbon_price = 0.0
     try:
         out = simulate(composition, m_dot, T_amb, T_sw)
-        return float(price * out.W_total * m_dot * 3600.0 / 1000.0)
     except ValueError:
         return None
+    electricity = price * out.W_total * m_dot * 3.6
+    if carbon_price > 0.0:
+        # Local import keeps the worker pickling cheap.
+        from lng_pinn.thermo import co2_per_kg_fuel
+        carbon = carbon_price * co2_per_kg_fuel(composition) * m_dot * 3.6
+        return float(electricity + carbon)
+    return float(electricity)
 
 
 def _flush_eval_partial(done: dict[int, float], path: Path) -> None:
@@ -132,6 +147,7 @@ def _eval_true_costs(
     label: str,
     resume: bool = True,
     ckpt_every: int = 2000,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> pd.DataFrame:
     """Re-evaluate a dispatch schedule through CoolProp to get true costs.
 
@@ -155,6 +171,7 @@ def _eval_true_costs(
                     float(row.T_amb),
                     float(row.T_sw),
                     float(row.price_eur_mwh),
+                    float(carbon_price_eur_per_t),
                 ),
             )
         )
@@ -217,15 +234,24 @@ def build_true_cost_summary(
     strategy_dfs: dict[str, pd.DataFrame],
     ts_df: pd.DataFrame,
     resume: bool = True,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> pd.DataFrame:
-    """Evaluate all strategies through CoolProp and build yearly true-cost summary."""
+    """Evaluate all strategies through CoolProp and build yearly true-cost summary.
+
+    ``carbon_price_eur_per_t`` must match the value dispatch was run at, else
+    the true-cost numbers will not be comparable to the PINN-cost numbers
+    (which include the carbon term whenever the dispatch was run with it).
+    """
     true_dfs = {}
     for name, df in strategy_dfs.items():
         path = RESULTS_DIR / f"true_costs_{name}.parquet"
         if resume and path.exists():
             true_dfs[name] = _restore_time_index(pd.read_parquet(path))
         else:
-            true_dfs[name] = _eval_true_costs(df, ts_df, name, resume=resume)
+            true_dfs[name] = _eval_true_costs(
+                df, ts_df, name, resume=resume,
+                carbon_price_eur_per_t=carbon_price_eur_per_t,
+            )
             # Write with `time` as a regular column so the cache round-trips correctly
             # (parquet's `index=False` drops the DatetimeIndex; explicit column survives).
             true_dfs[name].reset_index().to_parquet(path, index=False)
@@ -254,11 +280,16 @@ def build_fidelity_table(
     ts_df: pd.DataFrame,
     n_samples: int,
     resume: bool = True,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> pd.DataFrame:
     """Re-evaluate sampled PINN dispatch points through the CoolProp simulator.
 
     Resume-aware: if `results/tables/fidelity.parquet` already exists and matches the
     requested `n_samples`, it's returned without re-running CoolProp.
+
+    ``carbon_price_eur_per_t`` is added to the true-cost computation so the
+    PINN cost (which already includes carbon if dispatch was run with it) and
+    the true cost are on the same accounting basis.
     """
     final_path = RESULTS_DIR / "fidelity.parquet"
     if resume and final_path.exists():
@@ -269,6 +300,9 @@ def build_fidelity_table(
                 return cached
         except Exception as exc:
             print(f"  Could not read cached fidelity.parquet: {exc}; recomputing")
+
+    # Local import keeps the worker pool unaffected when carbon_price == 0.
+    from lng_pinn.thermo import co2_per_kg_fuel
 
     joined = aware_df.join(ts_df, how="inner")
     if n_samples < len(joined):
@@ -284,7 +318,14 @@ def build_fidelity_table(
             )
         except ValueError:
             continue
-        true_cost = float(row["price_eur_mwh"] * out.W_total * row["m_dot"] * 3600.0 / 1000.0)
+        electricity = float(row["price_eur_mwh"] * out.W_total * row["m_dot"] * 3.6)
+        if carbon_price_eur_per_t > 0.0:
+            carbon = float(
+                carbon_price_eur_per_t * co2_per_kg_fuel(composition) * row["m_dot"] * 3.6
+            )
+        else:
+            carbon = 0.0
+        true_cost = electricity + carbon
         records.append({
             "time": time,
             "m_dot": float(row["m_dot"]),
@@ -316,6 +357,13 @@ def main() -> None:
         action="store_true",
         help="Ignore existing true_costs / sensitivity / fidelity caches and recompute.",
     )
+    parser.add_argument(
+        "--carbon-price", type=float, default=0.0,
+        help="v1.3 B1: CO2 price (EUR/tCO2) used when re-evaluating dispatch through "
+             "CoolProp. Must match the value `04_run_dispatch.py --carbon-price` was "
+             "run with, else PINN and true costs won't be comparable. Default 0 "
+             "reproduces v1.2 (electricity-only) accounting.",
+    )
     args = parser.parse_args()
     resume = not args.no_resume
 
@@ -323,7 +371,12 @@ def main() -> None:
         git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     except Exception:
         git_sha = "unknown"
-    print(f"git_sha={git_sha}")
+    print(f"git_sha={git_sha}  carbon_price={args.carbon_price:.1f} EUR/tCO2")
+    if args.carbon_price > 0.0 and resume:
+        print(
+            "  NOTE: --carbon-price > 0 with --resume: existing true_costs_*.parquet "
+            "caches may be electricity-only. Delete them or pass --no-resume to rebuild."
+        )
 
     def _load(name: str) -> pd.DataFrame:
         path = RESULTS_DIR / f"{name}.parquet"
@@ -368,7 +421,11 @@ def main() -> None:
         "annual":   annual_df,
         "constant": constant_df,
     }
-    build_true_cost_summary(strategy_dfs, ts_df, resume=resume)
+    build_true_cost_summary(
+        strategy_dfs, ts_df,
+        resume=resume,
+        carbon_price_eur_per_t=args.carbon_price,
+    )
     print("yearly_summary_true.csv written (CoolProp true costs)")
 
     surrogate_eval_path = RESULTS_DIR / "surrogate_eval.parquet"
@@ -390,7 +447,11 @@ def main() -> None:
     fig_load_shift_heatmap(aware_df, blind_df, ts_df)
     print("fig3_load_shift.pdf written")
 
-    fidelity_df = build_fidelity_table(aware_df, ts_df, args.fidelity_samples, resume=resume)
+    fidelity_df = build_fidelity_table(
+        aware_df, ts_df, args.fidelity_samples,
+        resume=resume,
+        carbon_price_eur_per_t=args.carbon_price,
+    )
     fig_surrogate_fidelity(fidelity_df)
     print("fig4_fidelity.pdf written")
 

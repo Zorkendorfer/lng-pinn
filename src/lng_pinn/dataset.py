@@ -57,7 +57,6 @@ def _simulate_one(args: tuple[Any, ...]) -> dict[str, float] | None:
         J_TO_KWH,
         P_IN,
         P_OUT_DEFAULT,
-        T_IN,
         T_SENDOUT,
         pump_efficiency,
         simulate,

@@ -84,7 +84,7 @@ def composition_aux(composition: tuple[float, ...]) -> tuple[float, float, float
     request aux for many flow levels without re-querying CoolProp.
     """
     # Imported here to avoid a circular import with plant.py.
-    from lng_pinn.plant import P_IN, P_OUT_DEFAULT, T_IN, T_SENDOUT
+    from lng_pinn.plant import P_IN, P_OUT_DEFAULT, T_SENDOUT
 
     key = tuple(round(v, 6) for v in composition)
     cached = _AUX_CACHE.get(key)
