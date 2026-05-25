@@ -37,12 +37,36 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=1_000)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--ema-decay", type=float, default=0.999)
-    parser.add_argument("--patience", type=int, default=4_000)
-    # Accepted-but-ignored v1.1 args
+    parser.add_argument(
+        "--lambda-c", type=float, default=1.0,
+        help="Weight for the relative-cost loss term (A1).",
+    )
+    parser.add_argument("--patience", type=int, default=4_000, help="Early-stop patience in steps")
+    parser.add_argument(
+        "--no-early-stop",
+        action="store_true",
+        help="Disable early stopping (overrides --patience). Lets training run the full --steps.",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Ignore any existing pinn_v1.ckpt and start from step 0.",
+    )
+    parser.add_argument(
+        "--ckpt-every",
+        type=int,
+        default=None,
+        help="Save a full-state checkpoint every K steps (default: n_steps // 20).",
+    )
+    # Accepted-but-ignored v1.1 collocation args (kept so old commands don't break).
     parser.add_argument("--n-col", type=int, default=0)
     parser.add_argument("--lambda-e", type=float, default=0.0)
     parser.add_argument("--lambda-p", type=float, default=0.0)
     args = parser.parse_args()
+
+    # `--no-early-stop` is sugar for an unreachable patience target.
+    if args.no_early_stop:
+        args.patience = args.steps + 1
 
     try:
         git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
@@ -105,6 +129,9 @@ def main() -> None:
         warmup_steps=args.warmup,
         ema_decay=args.ema_decay,
         patience=args.patience,
+        lambda_cost=args.lambda_c,
+        resume=not args.no_resume,
+        ckpt_every=args.ckpt_every,
     )
     print("Checkpoint saved to results/models/pinn_v1.pt")
 

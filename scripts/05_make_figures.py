@@ -32,8 +32,19 @@ def build_sensitivity_table(
     blind_df: pd.DataFrame,
     ts_df: pd.DataFrame,
     horizon_days: int,
+    resume: bool = True,
 ) -> pd.DataFrame:
-    """Summarise dispatch savings by composition-variability window."""
+    """Summarise dispatch savings by composition-variability window.
+
+    Pure pandas aggregation — fast — but cached so that re-running the figure script
+    after only a downstream edit (e.g. plot styling) skips the re-aggregation.
+    """
+    cache_path = RESULTS_DIR / "sensitivity.parquet"
+    if resume and cache_path.exists():
+        try:
+            return pd.read_parquet(cache_path)
+        except Exception as exc:
+            print(f"  Could not read cached sensitivity.parquet: {exc}; recomputing")
     horizon = f"{horizon_days}D"
     saving = (blind_df["cost_eur"] - aware_df["cost_eur"]).resample(horizon).sum()
     aligned = ts_df[["price_eur_mwh", "CH4"]].reindex(aware_df.index)
@@ -102,57 +113,122 @@ def _eval_one_row(args: tuple) -> float | None:
         return None
 
 
+def _flush_eval_partial(done: dict[int, float], path: Path) -> None:
+    """Atomic write of completed (row_idx, true_cost_eur) pairs to a parquet partial."""
+    if not done:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(
+        {"_row_idx": list(done.keys()), "true_cost_eur": list(done.values())}
+    )
+    tmp = path.with_suffix(".parquet.tmp")
+    df.to_parquet(tmp, index=False)
+    tmp.replace(path)
+
+
 def _eval_true_costs(
     dispatch_df: pd.DataFrame,
     ts_df: pd.DataFrame,
     label: str,
+    resume: bool = True,
+    ckpt_every: int = 2000,
 ) -> pd.DataFrame:
-    """Re-evaluate a dispatch schedule through CoolProp to get true costs."""
+    """Re-evaluate a dispatch schedule through CoolProp to get true costs.
+
+    Resume behaviour: partial per-row results are flushed every `ckpt_every`
+    completions to data/processed/true_costs_partial_<label>.parquet, keyed by
+    positional row index (deterministic from the joined frame). On rerun, the
+    partial is loaded and only the missing rows are submitted to the pool.
+    Removed once the final results/tables/true_costs_<label>.parquet is written.
+    """
     joined = dispatch_df.join(ts_df, how="inner")
-    args = [
-        (
-            tuple(float(row[col]) for col in COMP_COLS),
-            float(row["m_dot"]),
-            float(row["T_amb"]),
-            float(row["T_sw"]),
-            float(row["price_eur_mwh"]),
+    rows = list(joined.itertuples())
+    n = len(rows)
+    all_args: list[tuple[int, tuple]] = []
+    for i, row in enumerate(rows):
+        all_args.append(
+            (
+                i,
+                (
+                    tuple(float(getattr(row, c)) for c in COMP_COLS),
+                    float(row.m_dot),
+                    float(row.T_amb),
+                    float(row.T_sw),
+                    float(row.price_eur_mwh),
+                ),
+            )
         )
-        for _, row in joined.iterrows()
-    ]
-    n_workers = max(1, os.cpu_count() or 1)
-    true_costs: list[float | None] = [None] * len(args)
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(_eval_one_row, a): i for i, a in enumerate(args)}
-        for future in tqdm(
-            as_completed(futures), total=len(args), desc=f"CoolProp {label}", leave=False
-        ):
-            true_costs[futures[future]] = future.result()
-    joined["true_cost_eur"] = [v if v is not None else np.nan for v in true_costs]
-    out = joined[["m_dot", "cost_eur", "true_cost_eur"]].dropna()
-    out.index.name = "time"
-    return out
+
+    partial_path = PROCESSED_DIR / f"true_costs_partial_{label}.parquet"
+    done: dict[int, float] = {}
+    if resume and partial_path.exists():
+        try:
+            prior = pd.read_parquet(partial_path)
+            for r in prior.itertuples(index=False):
+                done[int(r._row_idx)] = float(r.true_cost_eur)
+            print(f"    {label}: resuming with {len(done)}/{n} rows already evaluated")
+        except Exception as exc:
+            print(f"    {label}: could not resume partial ({exc}); recomputing")
+            done = {}
+
+    pending = [a for a in all_args if a[0] not in done]
+    if pending:
+        n_workers = max(1, os.cpu_count() or 1)
+        completed_since_ckpt = 0
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_eval_one_row, a[1]): a[0] for a in pending}
+            for future in tqdm(
+                as_completed(futures),
+                total=len(pending),
+                desc=f"CoolProp {label}",
+                leave=False,
+            ):
+                idx = futures[future]
+                cost = future.result()
+                if cost is not None:
+                    done[idx] = cost
+                completed_since_ckpt += 1
+                if completed_since_ckpt >= ckpt_every:
+                    _flush_eval_partial(done, partial_path)
+                    completed_since_ckpt = 0
+        _flush_eval_partial(done, partial_path)
+
+    joined["true_cost_eur"] = [done.get(i, np.nan) for i in range(n)]
+    result = joined[["m_dot", "cost_eur", "true_cost_eur"]].dropna()
+    result.index.name = "time"
+
+    if partial_path.exists():
+        partial_path.unlink()
+
+    return result
+
+
+def _restore_time_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Restore a DatetimeIndex on a cached true-cost frame regardless of how it was saved."""
+    if isinstance(df.index, pd.DatetimeIndex):
+        return df
+    if "time" in df.columns:
+        df = df.set_index("time")
+    df.index = pd.to_datetime(df.index, utc=True)
+    return df
 
 
 def build_true_cost_summary(
     strategy_dfs: dict[str, pd.DataFrame],
     ts_df: pd.DataFrame,
+    resume: bool = True,
 ) -> pd.DataFrame:
     """Evaluate all strategies through CoolProp and build yearly true-cost summary."""
     true_dfs = {}
     for name, df in strategy_dfs.items():
         path = RESULTS_DIR / f"true_costs_{name}.parquet"
-        cached: pd.DataFrame | None = None
-        if path.exists():
-            cached = pd.read_parquet(path)
-            # Older caches were saved without the time index — discard them so
-            # they get regenerated with proper datetime indexing for resample().
-            if not isinstance(cached.index, pd.DatetimeIndex):
-                cached = None
-        if cached is not None:
-            true_dfs[name] = cached
+        if resume and path.exists():
+            true_dfs[name] = _restore_time_index(pd.read_parquet(path))
         else:
-            true_dfs[name] = _eval_true_costs(df, ts_df, name)
-            true_dfs[name].to_parquet(path)  # preserve the time index
+            true_dfs[name] = _eval_true_costs(df, ts_df, name, resume=resume)
+            # Write with `time` as a regular column so the cache round-trips correctly
+            # (parquet's `index=False` drops the DatetimeIndex; explicit column survives).
+            true_dfs[name].reset_index().to_parquet(path, index=False)
 
     yearly = pd.DataFrame({
         name: true_dfs[name]["true_cost_eur"].resample("YE").sum()
@@ -177,8 +253,23 @@ def build_fidelity_table(
     aware_df: pd.DataFrame,
     ts_df: pd.DataFrame,
     n_samples: int,
+    resume: bool = True,
 ) -> pd.DataFrame:
-    """Re-evaluate sampled PINN dispatch points through the CoolProp simulator."""
+    """Re-evaluate sampled PINN dispatch points through the CoolProp simulator.
+
+    Resume-aware: if `results/tables/fidelity.parquet` already exists and matches the
+    requested `n_samples`, it's returned without re-running CoolProp.
+    """
+    final_path = RESULTS_DIR / "fidelity.parquet"
+    if resume and final_path.exists():
+        try:
+            cached = pd.read_parquet(final_path)
+            if len(cached) == n_samples or (n_samples >= len(aware_df.join(ts_df, how="inner"))):
+                print(f"  Reusing cached fidelity.parquet ({len(cached)} rows)")
+                return cached
+        except Exception as exc:
+            print(f"  Could not read cached fidelity.parquet: {exc}; recomputing")
+
     joined = aware_df.join(ts_df, how="inner")
     if n_samples < len(joined):
         sample_idx = np.linspace(0, len(joined) - 1, n_samples, dtype=int)
@@ -204,7 +295,7 @@ def build_fidelity_table(
         })
 
     table = pd.DataFrame(records).dropna()
-    table.to_parquet(RESULTS_DIR / "fidelity.parquet", index=False)
+    table.to_parquet(final_path, index=False)
     table.to_csv(RESULTS_DIR / "fidelity.csv", index=False)
     return table
 
@@ -220,7 +311,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--horizon-days", type=int, default=7)
     parser.add_argument("--fidelity-samples", type=int, default=1000)
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Ignore existing true_costs / sensitivity / fidelity caches and recompute.",
+    )
     args = parser.parse_args()
+    resume = not args.no_resume
 
     try:
         git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
@@ -271,7 +368,7 @@ def main() -> None:
         "annual":   annual_df,
         "constant": constant_df,
     }
-    build_true_cost_summary(strategy_dfs, ts_df)
+    build_true_cost_summary(strategy_dfs, ts_df, resume=resume)
     print("yearly_summary_true.csv written (CoolProp true costs)")
 
     surrogate_eval_path = RESULTS_DIR / "surrogate_eval.parquet"
@@ -284,14 +381,16 @@ def main() -> None:
     fig_cost_delta(aware_df, blind_df)
     print("fig1_cost_delta.pdf written")
 
-    sensitivity_df = build_sensitivity_table(aware_df, blind_df, ts_df, args.horizon_days)
+    sensitivity_df = build_sensitivity_table(
+        aware_df, blind_df, ts_df, args.horizon_days, resume=resume
+    )
     fig_sensitivity(sensitivity_df)
     print("fig2_sensitivity.pdf written")
 
     fig_load_shift_heatmap(aware_df, blind_df, ts_df)
     print("fig3_load_shift.pdf written")
 
-    fidelity_df = build_fidelity_table(aware_df, ts_df, args.fidelity_samples)
+    fidelity_df = build_fidelity_table(aware_df, ts_df, args.fidelity_samples, resume=resume)
     fig_surrogate_fidelity(fidelity_df)
     print("fig4_fidelity.pdf written")
 

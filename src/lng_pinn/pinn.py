@@ -59,6 +59,8 @@ from torch import Tensor
 from tqdm import tqdm
 
 RESULTS_DIR = Path("results/models")
+CKPT_PATH = RESULTS_DIR / "pinn_v1.ckpt"
+FINAL_PATH = RESULTS_DIR / "pinn_v1.pt"
 
 INPUT_DIM = 9   # CH4, C2H6, C3H8, nC4, iC4, N2, m_dot, T_amb, T_sw
 OUTPUT_DIM = 4  # W_pump, W_total, T_out, exergy_destruction (publicly preserved)
@@ -226,6 +228,26 @@ def energy_balance_residual(
     return torch.relu(-Q_sw_implied / 5e5).pow(2).mean()
 
 
+def relative_cost_loss(
+    y_pred_raw: Tensor,
+    y_true_raw: Tensor,
+    scaler: Scaler,
+    eps: float = 1e-6,
+) -> Tensor:
+    """Relative-error MSE on W_pump and W_total (channels 0, 1).
+
+    Aligns the training objective with the cost residual the dispatch uses:
+        (cost_pred - cost_true) / cost_true = (W_pred - W_true) / W_true
+    Price and m_dot cancel, so a relative-error MSE on W is exactly the
+    relative-error MSE on dispatch cost.
+    """
+    y_pred = scaler.unscale_y(y_pred_raw)
+    y_true = scaler.unscale_y(y_true_raw)
+    w_pred = y_pred[:, [0, 1]]
+    w_true = y_true[:, [0, 1]]
+    return ((w_pred - w_true) / (w_true.abs() + eps)).pow(2).mean()
+
+
 def _alpha_target(
     h_in: Tensor,
     h_out: Tensor,
@@ -267,6 +289,60 @@ class _EMA:
         return backup
 
 
+def _save_ckpt(
+    path: Path,
+    *,
+    model: PINNMLP,
+    optimizer: optim.Optimizer,
+    scheduler: optim.lr_scheduler.LRScheduler,
+    scaler: Scaler,
+    step: int,
+    n_steps: int,
+    best_val_loss: float,
+    best_state: dict[str, Tensor] | None,
+    steps_since_improvement: int,
+    done: bool,
+    device: torch.device,
+    log_var: Tensor | None = None,
+    ema_shadow: dict[str, Tensor] | None = None,
+) -> None:
+    """Atomic write of the full training-state checkpoint.
+
+    ``log_var`` and ``ema_shadow`` are v1.3 additions: the Kendall multi-task
+    weights and the EMA model copy. Saving them makes resume bit-exact rather
+    than just step-exact.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ckpt: dict[str, Any] = {
+        "model_state": {k: v.cpu().clone() for k, v in model.state_dict().items()},
+        "optimizer_state": optimizer.state_dict(),
+        "scheduler_state": scheduler.state_dict(),
+        "scaler": scaler.to("cpu"),
+        "step": step,
+        "n_steps": n_steps,
+        "best_val_loss": best_val_loss,
+        "best_state": best_state,
+        "steps_since_improvement": steps_since_improvement,
+        "done": done,
+        "torch_rng_state": torch.get_rng_state(),
+    }
+    if log_var is not None:
+        ckpt["log_var"] = log_var.detach().cpu().clone()
+    if ema_shadow is not None:
+        ckpt["ema_shadow"] = {k: v.detach().cpu().clone() for k, v in ema_shadow.items()}
+    if device.type == "cuda":
+        ckpt["cuda_rng_state"] = torch.cuda.get_rng_state()
+    tmp = path.with_suffix(".ckpt.tmp")
+    torch.save(ckpt, tmp)
+    tmp.replace(path)
+
+
+def _load_ckpt(path: Path, device: torch.device) -> dict[str, Any]:
+    """Load a training-state checkpoint. weights_only=False because we trust our own file."""
+    with torch.serialization.safe_globals([Scaler]):
+        return torch.load(path, map_location=device, weights_only=False)
+
+
 def train(
     X_train: Tensor,
     y_train: Tensor,
@@ -293,11 +369,22 @@ def train(
     val_every: int = 500,
     patience: int = 4_000,
     ema_decay: float = 0.999,
+    lambda_cost: float = 1.0,
+    resume: bool = True,
+    ckpt_every: int | None = None,
 ) -> PINNMLP:
     """Train the v1.3 physics-constrained PINN.
 
     Inputs / labels are normalised (length-9 / length-4 respectively).
     ``aux_train`` has shape (N, 3): (h_in J/kg, h_out J/kg, W_pump_expected kWh/kg).
+
+    ``lambda_cost`` controls the v1.3 A1 relative-cost loss, applied on top of
+    the Kendall-weighted multi-task loss. The cost loss penalises relative
+    error on W_pump and W_total — directly aligned with the dispatch objective.
+
+    ``resume`` / ``ckpt_every`` enable two-level training: a long run can be
+    resumed from the last full-state checkpoint (model + optimiser +
+    scheduler + EMA + log_var + RNG) without losing progress.
     """
     del X_col, h_in_col, h_out_col, W_pump_expected, lambda_energy, lambda_pump
     del lambda_data  # all losses are now uncertainty-weighted
@@ -322,6 +409,7 @@ def train(
     W_trim_raw = W_total_raw - W_pump_raw
     alpha_train = _alpha_target(aux_train[:, 0], aux_train[:, 1], W_pump_raw, W_trim_raw)
 
+    # ---- Optimiser, scheduler, multi-task weights, EMA ----------------------------
     # Kendall multi-task uncertainty weights (one per task: alpha, W_total, T_out, exergy).
     # L = sum_k 0.5 * exp(-s_k) * loss_k + 0.5 * s_k.
     log_var = nn.Parameter(torch.zeros(4, device=device))
@@ -335,19 +423,84 @@ def train(
     def lr_lambda(step: int) -> float:
         if step < warmup_steps:
             return (step + 1) / max(1, warmup_steps)
-        # Cosine decay from 1 down to 0.02 over the remaining steps.
         progress = (step - warmup_steps) / max(1, n_steps - warmup_steps)
         return 0.02 + 0.98 * 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.14159265)).item())
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     ema = _EMA(model, decay=ema_decay)
 
+    if ckpt_every is None:
+        ckpt_every = max(1, n_steps // 20)
+
+    start_step = 0
     best_val = float("inf")
     best_state: dict[str, Tensor] | None = None
     steps_since_improve = 0
 
-    pbar = tqdm(range(n_steps), desc="Training PINN v1.3", unit="step")
+    # ---- Resume from checkpoint if present ----------------------------------------
+    if resume and CKPT_PATH.exists():
+        try:
+            ckpt = _load_ckpt(CKPT_PATH, device)
+            stored_n_steps = ckpt.get("n_steps", n_steps)
+            if stored_n_steps != n_steps:
+                print(
+                    f"  WARN: checkpoint was set up for {stored_n_steps} total steps, "
+                    f"now requested {n_steps}. Scheduler curve will not match a "
+                    "from-scratch run exactly."
+                )
+            model.load_state_dict(ckpt["model_state"])
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+            scheduler.load_state_dict(ckpt["scheduler_state"])
+            if "log_var" in ckpt:
+                log_var.data.copy_(ckpt["log_var"].to(device))
+            if "ema_shadow" in ckpt:
+                ema.shadow = {k: v.to(device) for k, v in ckpt["ema_shadow"].items()}
+            start_step = int(ckpt["step"])
+            best_val = float(ckpt["best_val_loss"])
+            best_state = ckpt.get("best_state")
+            steps_since_improve = int(ckpt.get("steps_since_improvement", 0))
+            torch.set_rng_state(ckpt["torch_rng_state"].cpu())
+            if device.type == "cuda" and "cuda_rng_state" in ckpt:
+                torch.cuda.set_rng_state(ckpt["cuda_rng_state"].cpu())
+            print(
+                f"  Resumed from {CKPT_PATH.name}: step {start_step}/{n_steps}, "
+                f"best val_loss={best_val:.4e}, since_improvement={steps_since_improve}"
+            )
+            if ckpt.get("done") or start_step >= n_steps:
+                print("  Checkpoint marks training complete — restoring best weights.")
+                if best_state is not None:
+                    model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+                else:
+                    ema.apply_to(model)
+                model = model.cpu()
+                scaler_cpu = scaler.to("cpu")
+                model.set_output_constraints(scaler_cpu)
+                model.attach_scaler(scaler_cpu)
+                FINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(
+                    {"model_state": model.state_dict(), "scaler": scaler_cpu, "version": "v1.3"},
+                    FINAL_PATH,
+                )
+                return model
+        except Exception as exc:
+            print(f"  Could not resume from {CKPT_PATH.name}: {exc}; starting from step 0")
+            start_step = 0
+            best_val = float("inf")
+            best_state = None
+            steps_since_improve = 0
+
+    # ---- Training loop ------------------------------------------------------------
+    early_stopped = False
+    pbar = tqdm(
+        range(start_step, n_steps),
+        desc="Training PINN v1.3",
+        unit="step",
+        initial=start_step,
+        total=n_steps,
+    )
+    last_step = start_step
     for step in pbar:
+        last_step = step
         idx = torch.randint(len(X_train), (batch_size,), device=device)
         xb = X_train[idx]
         yb = y_train[idx]
@@ -357,15 +510,19 @@ def train(
         T_out_norm, alpha_pred, exergy_norm = model._net_outputs(xb)  # noqa: SLF001
         y_pred = model(xb, ab, scaler=scaler)
 
-        # Per-task MSE (all in normalised space except alpha which is bounded).
         loss_alpha = (alpha_pred - alpha_b).pow(2).mean()
         loss_W = (y_pred[:, 1] - yb[:, 1]).pow(2).mean()
         loss_T = (T_out_norm - yb[:, 2]).pow(2).mean()
         loss_E = (exergy_norm - yb[:, 3]).pow(2).mean()
         losses = torch.stack([loss_alpha, loss_W, loss_T, loss_E])
 
-        # Uncertainty-weighted sum.
-        loss = (0.5 * torch.exp(-log_var) * losses + 0.5 * log_var).sum()
+        # Kendall multi-task uncertainty weighting.
+        loss_mt = (0.5 * torch.exp(-log_var) * losses + 0.5 * log_var).sum()
+
+        # A1: relative-cost loss, applied directly (not uncertainty-weighted) so
+        # it acts as a calibration term independent of the Kendall weights drifting.
+        loss_cost = relative_cost_loss(y_pred, yb, scaler) if lambda_cost > 0 else torch.zeros((), device=device)
+        loss = loss_mt + lambda_cost * loss_cost
 
         optimizer.zero_grad()
         loss.backward()
@@ -382,6 +539,7 @@ def train(
                 W=f"{loss_W.item():.2e}",
                 T=f"{loss_T.item():.2e}",
                 E=f"{loss_E.item():.2e}",
+                c=f"{loss_cost.item():.2e}",
                 wα=f"{w[0]:.2f}",
                 wW=f"{w[1]:.2f}",
             )
@@ -400,27 +558,52 @@ def train(
             model.load_state_dict(backup)
             if steps_since_improve >= patience:
                 pbar.set_description(f"Early stop at step {step} (val={best_val:.3e})")
+                early_stopped = True
                 break
 
-    # Use EMA weights for the final checkpoint, falling back to best-by-val if better.
-    ema.apply_to(model)
-    if best_state is not None:
-        # Compare EMA vs best-by-val on val set; pick the lower one.
-        if X_val is not None:
-            with torch.no_grad():
-                ema_val = (model(X_val, aux_val, scaler=scaler)[:, 1] - y_val[:, 1]).pow(2).mean().item()  # type: ignore[arg-type, index]
-            if best_val < ema_val:
-                model.load_state_dict(best_state)
+        # Periodic full-state checkpoint for resume.
+        if (step + 1) % ckpt_every == 0:
+            _save_ckpt(
+                CKPT_PATH,
+                model=model, optimizer=optimizer, scheduler=scheduler, scaler=scaler,
+                step=step + 1, n_steps=n_steps,
+                best_val_loss=best_val, best_state=best_state,
+                steps_since_improvement=steps_since_improve,
+                done=False, device=device,
+                log_var=log_var, ema_shadow=ema.shadow,
+            )
 
+    # ---- Final weights: EMA vs best-by-val, pick the lower ------------------------
+    ema.apply_to(model)
+    if best_state is not None and X_val is not None:
+        with torch.no_grad():
+            ema_val = (model(X_val, aux_val, scaler=scaler)[:, 1] - y_val[:, 1]).pow(2).mean().item()  # type: ignore[arg-type, index]
+        if best_val < ema_val:
+            model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+
+    # Final-state checkpoint marks completion.
+    _save_ckpt(
+        CKPT_PATH,
+        model=model, optimizer=optimizer, scheduler=scheduler, scaler=scaler,
+        step=last_step + 1, n_steps=n_steps,
+        best_val_loss=best_val, best_state=best_state,
+        steps_since_improvement=steps_since_improve,
+        done=True, device=device,
+        log_var=log_var, ema_shadow=ema.shadow,
+    )
+
+    # Inference-only checkpoint for downstream scripts.
     model = model.cpu()
     scaler_cpu = scaler.to("cpu")
     model.set_output_constraints(scaler_cpu)
     model.attach_scaler(scaler_cpu)
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    FINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {"model_state": model.state_dict(), "scaler": scaler_cpu, "version": "v1.3"},
-        RESULTS_DIR / "pinn_v1.pt",
+        FINAL_PATH,
     )
+    if early_stopped:
+        print(f"  Early stop fired at step {last_step}; checkpoint marked done.")
     return model
 
 
@@ -457,7 +640,7 @@ def build_aux(
     return torch.from_numpy(aux)
 
 
-def load(path: str | Path = RESULTS_DIR / "pinn_v1.pt") -> tuple[PINNMLP, Scaler]:
+def load(path: str | Path = FINAL_PATH) -> tuple[PINNMLP, Scaler]:
     with torch.serialization.safe_globals([Scaler]):
         checkpoint: dict[str, Any] = torch.load(path, map_location="cpu", weights_only=False)
     scaler: Scaler = checkpoint["scaler"]
