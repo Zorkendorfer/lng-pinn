@@ -18,6 +18,18 @@ import CoolProp.CoolProp as CP
 SPECIES = ("Methane", "Ethane", "Propane", "n-Butane", "IsoButane", "Nitrogen")
 SPECIES_KEYS = ("CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2")
 
+# v1.3 B1: combustion stoichiometry for the carbon-cost dispatch term.
+MW_CO2 = 44.009  # g/mol
+MW_SPECIES = {  # g/mol — must align with SPECIES order below
+    "Methane":   16.043,
+    "Ethane":    30.070,
+    "Propane":   44.097,
+    "n-Butane":  58.123,
+    "IsoButane": 58.123,
+    "Nitrogen":  28.013,
+}
+_C_PER_MOL = (1, 2, 3, 4, 4, 0)  # carbons per molecule, aligned with SPECIES
+
 _STATE: Any = None
 
 
@@ -91,6 +103,20 @@ def composition_aux(composition: tuple[float, ...]) -> tuple[float, float, float
 
 
 _AUX_CACHE: dict[tuple[float, ...], tuple[float, float, float]] = {}
+
+
+def co2_per_kg_fuel(x: tuple[float, ...]) -> float:
+    """kg of CO2 released per kg of fuel fully combusted (no slip, no flare).
+
+    Used by the v1.3 B1 carbon-cost dispatch term. The mole-fraction vector
+    ``x`` follows the canonical SPECIES order. Nitrogen contributes mass to
+    the denominator but no carbon. For natural-gas compositions in the v1
+    operating envelope this returns ~2.50–2.95 kg CO2/kg fuel — a ~15%
+    spread that drives the composition signal at non-zero carbon prices.
+    """
+    mol_co2 = sum(xi * ci for xi, ci in zip(x, _C_PER_MOL))
+    mw_fuel = sum(xi * MW_SPECIES[sp] for xi, sp in zip(x, SPECIES))
+    return mol_co2 * MW_CO2 / mw_fuel
 
 
 def lower_heating_value(x: tuple[float, ...]) -> float:

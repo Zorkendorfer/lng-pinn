@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import torch
 
 from lng_pinn.dispatch import TANK_CAP, Schedule, optimize
 from lng_pinn.pinn import PINNMLP, Scaler, build_aux
+from lng_pinn.thermo import co2_per_kg_fuel
 
 COMP_COLS = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2"]
 
@@ -28,10 +30,11 @@ def optimize_blind_horizon(
     scaler: Scaler,
     demand_kg: float,
     inv0: float = 0.5,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> Schedule:
     """Run dispatch with composition fixed to the horizon mean."""
     blind_df = _with_fixed_composition(horizon_df, horizon_df[COMP_COLS].mean())
-    return optimize(blind_df, model, scaler, demand_kg, inv0)
+    return optimize(blind_df, model, scaler, demand_kg, inv0, carbon_price_eur_per_t)
 
 
 def optimize_blind_annual(
@@ -41,10 +44,11 @@ def optimize_blind_annual(
     demand_kg: float,
     annual_composition: pd.Series,
     inv0: float = 0.5,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> Schedule:
     """Run dispatch with composition fixed to the full-backtest annual mean."""
     blind_df = _with_fixed_composition(horizon_df, annual_composition)
-    return optimize(blind_df, model, scaler, demand_kg, inv0)
+    return optimize(blind_df, model, scaler, demand_kg, inv0, carbon_price_eur_per_t)
 
 
 def optimize_constant_flow(
@@ -53,6 +57,7 @@ def optimize_constant_flow(
     scaler: Scaler,
     demand_kg: float,
     inv0: float = 0.5,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> Schedule:
     """Dispatch at the constant flow required to meet horizon demand."""
     m_dot = demand_kg / (len(horizon_df) * 3600.0)
@@ -69,6 +74,12 @@ def optimize_constant_flow(
     price = horizon_df["price_eur_mwh"].values
     m_dot_out = pd.Series(m_dot, index=horizon_df.index).to_numpy()
     cost_out = price * W_total * m_dot * 3600.0 / 1000.0
+    if carbon_price_eur_per_t > 0.0:
+        co2_factor = np.array(
+            [co2_per_kg_fuel(tuple(float(v) for v in row)) for row in horizon_df[COMP_COLS].values],
+            dtype=np.float64,
+        )
+        cost_out = cost_out + carbon_price_eur_per_t * co2_factor * m_dot * 3.6
     cumulative_flow = pd.Series(m_dot_out * 3600.0).cumsum().to_numpy()
     tank_level = inv0 - pd.Series([0.0, *cumulative_flow]).to_numpy() / TANK_CAP
     return Schedule(
@@ -86,6 +97,7 @@ def optimize_blind_lagged(
     demand_kg: float,
     lagged_composition: pd.Series,
     inv0: float = 0.5,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> Schedule:
     """Run dispatch with composition fixed to the value at the start of the window.
 
@@ -93,7 +105,7 @@ def optimize_blind_lagged(
     and held constant for the horizon, without knowing how it will evolve.
     """
     blind_df = _with_fixed_composition(horizon_df, lagged_composition)
-    return optimize(blind_df, model, scaler, demand_kg, inv0)
+    return optimize(blind_df, model, scaler, demand_kg, inv0, carbon_price_eur_per_t)
 
 
 def optimize_blind(
@@ -102,6 +114,9 @@ def optimize_blind(
     scaler: Scaler,
     demand_kg: float,
     inv0: float = 0.5,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> Schedule:
     """Backward-compatible alias for the horizon-mean blind baseline."""
-    return optimize_blind_horizon(horizon_df, model, scaler, demand_kg, inv0)
+    return optimize_blind_horizon(
+        horizon_df, model, scaler, demand_kg, inv0, carbon_price_eur_per_t
+    )

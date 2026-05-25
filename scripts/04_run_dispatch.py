@@ -128,13 +128,20 @@ def main() -> None:
         action="store_true",
         help="Ignore any existing dispatch_partial.* and start from the first window.",
     )
+    parser.add_argument(
+        "--carbon-price", type=float, default=0.0,
+        help="v1.3 B1 CO2 price in EUR per tonne. 0 reproduces v1.2 results bit-exactly.",
+    )
     args = parser.parse_args()
 
     try:
         git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     except Exception:
         git_sha = "unknown"
-    print(f"git_sha={git_sha}  horizon_days={args.horizon_days}")
+    print(
+        f"git_sha={git_sha}  horizon_days={args.horizon_days}  "
+        f"carbon_price={args.carbon_price:.1f} EUR/tCO2"
+    )
 
     model, scaler = load()
     model.eval()
@@ -182,16 +189,24 @@ def main() -> None:
         lagged_composition = ts[COMP_COLS].iloc[start]
         record_hours = min(step, len(window))
 
-        aware_sched    = optimize(window, model, scaler, demand_kg, inv["aware"])
-        horizon_sched  = optimize_blind_horizon(window, model, scaler, demand_kg, inv["horizon"])
+        cp = args.carbon_price
+        aware_sched    = optimize(
+            window, model, scaler, demand_kg, inv["aware"], carbon_price_eur_per_t=cp,
+        )
+        horizon_sched  = optimize_blind_horizon(
+            window, model, scaler, demand_kg, inv["horizon"], carbon_price_eur_per_t=cp,
+        )
         lagged_sched   = optimize_blind_lagged(
-            window, model, scaler, demand_kg, lagged_composition, inv["lagged"]
+            window, model, scaler, demand_kg, lagged_composition, inv["lagged"],
+            carbon_price_eur_per_t=cp,
         )
         annual_sched   = optimize_blind_annual(
-            window, model, scaler, demand_kg, annual_composition, inv["annual"]
+            window, model, scaler, demand_kg, annual_composition, inv["annual"],
+            carbon_price_eur_per_t=cp,
         )
         constant_sched = optimize_constant_flow(
-            window, model, scaler, demand_kg, inv["constant"]
+            window, model, scaler, demand_kg, inv["constant"],
+            carbon_price_eur_per_t=cp,
         )
 
         _append_records(

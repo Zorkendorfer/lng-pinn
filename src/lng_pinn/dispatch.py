@@ -15,6 +15,7 @@ from scipy.optimize import Bounds, LinearConstraint, milp
 from scipy.sparse import csr_matrix, vstack
 
 from lng_pinn.pinn import PINNMLP, Scaler, build_aux
+from lng_pinn.thermo import co2_per_kg_fuel
 
 N_FLOW_LEVELS = 15  # discretisation resolution
 M_DOT_MIN = 10.0  # kg/s — minimum stable turndown
@@ -32,13 +33,20 @@ class Schedule:
     total_cost: float
 
 
+COMP_COLS = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2"]
+
+
 def _pinn_cost_table(
     horizon_df: pd.DataFrame,
     model: PINNMLP,
     scaler: Scaler,
     flow_levels: np.ndarray,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> np.ndarray:
-    """Pre-compute cost (EUR/h) for each (hour, flow_level) pair.
+    """Pre-compute total cost (EUR/h) for each (hour, flow_level) pair.
+
+    cost[t, l] = price[t] * W_total[t, l] * flow_levels[l] * 3.6
+               + carbon_price * co2_factor[t] * flow_levels[l] * 3.6
 
     Returns array of shape (T, N_FLOW_LEVELS).
     Batches all (T × L) inputs in a single PINN forward pass.
@@ -67,9 +75,21 @@ def _pinn_cost_table(
 
     W_total = W_total.reshape(T, L)  # (T, L)
     price = horizon_df["price_eur_mwh"].values[:, None]  # (T, 1)
-    # cost (EUR/h) = price (EUR/MWh) * W_total (kWh/kg) * m_dot (kg/s) * 3600 s / 1000
-    cost_table = price * W_total * flow_levels[None, :] * 3600.0 / 1000.0
-    return cost_table.astype(np.float64)
+    # electricity_cost (EUR/h) = price (EUR/MWh) * W_total (kWh/kg)
+    #                          * m_dot (kg/s) * (3600 s/h / 1000 kWh/MWh)
+    electricity_cost = price * W_total * flow_levels[None, :] * 3600.0 / 1000.0
+
+    if carbon_price_eur_per_t > 0.0:
+        # co2_factor (kg CO2 / kg fuel) varies per hour as composition changes.
+        co2_factor = np.array(
+            [co2_per_kg_fuel(tuple(float(v) for v in row)) for row in horizon_df[COMP_COLS].values],
+            dtype=np.float64,
+        )[:, None]
+        # carbon_cost (EUR/h) = price_co2 (EUR/t) * co2_factor (kg/kg) * m_dot (kg/s) * 3.6
+        # (3.6 = 3600 s/h / 1000 kg/t).
+        carbon_cost = carbon_price_eur_per_t * co2_factor * flow_levels[None, :] * 3.6
+        return (electricity_cost + carbon_cost).astype(np.float64)
+    return electricity_cost.astype(np.float64)
 
 
 def optimize(
@@ -78,6 +98,7 @@ def optimize(
     scaler: Scaler,
     demand_kg: float,
     inv0: float = 0.5,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> Schedule:
     """Run dispatch optimisation over horizon_df.
 
@@ -88,10 +109,16 @@ def optimize(
         scaler:     Matching Scaler.
         demand_kg:  Total send-out requirement (kg) over the horizon.
         inv0:       Initial tank level (fraction of TANK_CAP).
+        carbon_price_eur_per_t:
+            v1.3 B1 carbon-cost term, in EUR per tonne CO2. With the default 0.0
+            the objective is electricity-only and results are bit-identical to v1.2.
     """
     T = len(horizon_df)
     flow_levels = np.linspace(M_DOT_MIN, M_DOT_MAX, N_FLOW_LEVELS)
-    cost_table = _pinn_cost_table(horizon_df, model, scaler, flow_levels)
+    cost_table = _pinn_cost_table(
+        horizon_df, model, scaler, flow_levels,
+        carbon_price_eur_per_t=carbon_price_eur_per_t,
+    )
 
     if not np.isfinite(cost_table).all():
         raise ValueError("PINN produced non-finite dispatch costs")

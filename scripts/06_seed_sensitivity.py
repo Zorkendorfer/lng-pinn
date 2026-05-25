@@ -117,6 +117,7 @@ def _run_backtest(
     seed: int,
     resume: bool = True,
     ckpt_every: int = 20,
+    carbon_price_eur_per_t: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     H = HORIZON_DAYS * 24
     step = 24
@@ -151,12 +152,16 @@ def _run_backtest(
         lagged_composition = ts[COMP_COLS].iloc[start]
         n = min(step, len(window))
 
-        a_sched = optimize(window, model, scaler, demand_kg, inv["aware"])  # type: ignore[arg-type]
+        cp = carbon_price_eur_per_t
+        a_sched = optimize(  # type: ignore[arg-type]
+            window, model, scaler, demand_kg, inv["aware"], carbon_price_eur_per_t=cp,
+        )
         l_sched = optimize_blind_lagged(  # type: ignore[arg-type]
-            window, model, scaler, demand_kg, lagged_composition, inv["lagged"]
+            window, model, scaler, demand_kg, lagged_composition, inv["lagged"],
+            carbon_price_eur_per_t=cp,
         )
         h_sched = optimize_blind_horizon(  # type: ignore[arg-type]
-            window, model, scaler, demand_kg, inv["horizon"]
+            window, model, scaler, demand_kg, inv["horizon"], carbon_price_eur_per_t=cp,
         )
 
         for t, row in enumerate(window.iloc[:n].itertuples()):
@@ -241,6 +246,11 @@ def main() -> None:
         action="store_true",
         help="Ignore cached per-seed results and partials; rerun all seeds from scratch.",
     )
+    parser.add_argument(
+        "--carbon-price", type=float, default=0.0,
+        help="v1.3 B1 CO2 price in EUR per tonne. Cached seed results are invalidated "
+             "whenever this changes value across runs.",
+    )
     args = parser.parse_args()
     resume = not args.no_resume
 
@@ -248,7 +258,7 @@ def main() -> None:
         git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     except Exception:
         git_sha = "unknown"
-    print(f"git_sha={git_sha}  seeds={SEEDS}")
+    print(f"git_sha={git_sha}  seeds={SEEDS}  carbon_price={args.carbon_price:.1f} EUR/tCO2")
 
     model, scaler = load()
     model.eval()
@@ -264,7 +274,8 @@ def main() -> None:
         else:
             ts = _ts_for_seed(seed)
             aware_df, lagged_df, horizon_df = _run_backtest(
-                ts, model, scaler, seed=seed, resume=resume, ckpt_every=args.ckpt_every
+                ts, model, scaler, seed=seed, resume=resume, ckpt_every=args.ckpt_every,
+                carbon_price_eur_per_t=args.carbon_price,
             )
             _save_seed_result(aware_df, lagged_df, horizon_df, seed)
             _clear_seed_partial(seed)
