@@ -264,7 +264,7 @@ def train(
                 f"best val_loss={best_val_loss:.4e}, since_improvement={steps_since_improvement}"
             )
             if ckpt.get("done") or start_step >= n_steps:
-                print("  Checkpoint marks training complete — restoring best weights and returning.")
+                print("  Checkpoint marks training complete — restoring best weights.")
                 if best_state is not None:
                     model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
                 model = model.cpu()
