@@ -60,6 +60,39 @@ def mixture_state(x: tuple[float, ...], T: float, P: float) -> MixtureState:
     )
 
 
+def composition_aux(composition: tuple[float, ...]) -> tuple[float, float, float]:
+    """Return (h_in J/kg, h_out J/kg, rho_in kg/m^3) for one LNG composition.
+
+    h_in is the saturated-liquid enthalpy at storage conditions (P_IN, T_IN);
+    h_out is the gas enthalpy at send-out conditions (P_OUT_DEFAULT, T_SENDOUT);
+    rho_in is the liquid density at storage conditions, needed for pump work.
+
+    Cached per composition tuple (rounded to 6 decimals) so dispatch can
+    request aux for many flow levels without re-querying CoolProp.
+    """
+    # Imported here to avoid a circular import with plant.py.
+    from lng_pinn.plant import P_IN, P_OUT_DEFAULT, T_IN, T_SENDOUT
+
+    key = tuple(round(v, 6) for v in composition)
+    cached = _AUX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    state = get_state(composition)
+    state.specify_phase(CP.iphase_liquid)
+    state.update(CP.PT_INPUTS, P_IN, T_IN)
+    h_in = state.hmolar() / state.molar_mass()
+    rho_in = state.rhomass()
+    state.unspecify_phase()
+    state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
+    h_out = state.hmolar() / state.molar_mass()
+    result = (float(h_in), float(h_out), float(rho_in))
+    _AUX_CACHE[key] = result
+    return result
+
+
+_AUX_CACHE: dict[tuple[float, ...], tuple[float, float, float]] = {}
+
+
 def lower_heating_value(x: tuple[float, ...]) -> float:
     """Return molar LHV (J/mol) of the mixture via component LHVs."""
     # LHV values (J/mol) from NIST/GPA at 25 °C, 1 atm

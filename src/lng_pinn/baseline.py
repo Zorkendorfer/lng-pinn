@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 
 from lng_pinn.dispatch import TANK_CAP, Schedule, optimize
-from lng_pinn.pinn import PINNMLP, Scaler
+from lng_pinn.pinn import PINNMLP, Scaler, build_aux
 
 COMP_COLS = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2"]
 
@@ -62,7 +62,8 @@ def optimize_constant_flow(
 
     with torch.no_grad():
         X = torch.tensor(rows, dtype=torch.float32)
-        y = scaler.unscale_y(model(scaler.scale_x(X))).numpy()
+        aux = build_aux(X[:, :6].numpy(), X[:, 6].numpy())
+        y = scaler.unscale_y(model(scaler.scale_x(X), aux, scaler=scaler)).numpy()
 
     W_total = y[:, 1]
     price = horizon_df["price_eur_mwh"].values

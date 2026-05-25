@@ -1,61 +1,32 @@
-"""Train the PINN surrogate on the pre-built dataset."""
+"""Train the v1.3 physics-constrained PINN surrogate.
+
+The new architecture removes the physics-residual losses (energy balance,
+pump work) — they are enforced exactly by construction. Training is now
+pure supervised regression on (W_total, T_out, alpha, exergy), with
+uncertainty-weighted multi-task loss handled inside ``pinn.train``.
+
+The script still supports the v1.1 CLI flags (--lambda-e, --lambda-p,
+--n-col) for backward compatibility; they are accepted but ignored.
+"""
 
 import argparse
 import subprocess
 import sys
 from pathlib import Path
 
-import CoolProp.CoolProp as CP
 import numpy as np
 import pandas as pd
 import torch
-from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from lng_pinn.dataset import BOUNDS, _sample_compositions
 from lng_pinn.pinn import Scaler, train
-from lng_pinn.plant import P_IN, P_OUT_DEFAULT, T_IN, T_SENDOUT
-from lng_pinn.thermo import get_state
 
 PROCESSED_DIR = Path("data/processed")
 RESULTS_DIR = Path("results/tables")
 INPUT_COLS = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2", "m_dot", "T_amb", "T_sw"]
 OUTPUT_COLS = ["W_pump", "W_total", "T_out", "exergy_destruction"]
-PUMP_COL = "W_pump_expected"
-PHYSICS_COLS = ["h_in_per_kg", "h_out_per_kg", PUMP_COL]
-
-
-def _compute_h_in_out_col(
-    comp_np: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute h_in, h_out (J/kg) and a valid boolean mask for each collocation composition.
-
-    Compositions that are not liquid at storage conditions (P_IN, T_IN) are marked invalid
-    and get placeholder zeros; the caller should filter them out of X_col.
-    """
-    h_in_list, h_out_list, valid_list = [], [], []
-    for comp in tqdm(comp_np, desc="h_in/h_out for collocation", unit="pts"):
-        try:
-            state = get_state(tuple(float(v) for v in comp))
-            state.specify_phase(CP.iphase_liquid)
-            state.update(CP.PT_INPUTS, P_IN, T_IN)
-            h_in = state.hmolar() / state.molar_mass()
-            state.unspecify_phase()
-            state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
-            h_out = state.hmolar() / state.molar_mass()
-            h_in_list.append(h_in)
-            h_out_list.append(h_out)
-            valid_list.append(True)
-        except Exception:
-            h_in_list.append(0.0)
-            h_out_list.append(0.0)
-            valid_list.append(False)
-    return (
-        np.array(h_in_list, dtype=np.float32),
-        np.array(h_out_list, dtype=np.float32),
-        np.array(valid_list, dtype=bool),
-    )
+AUX_COLS = ["h_in_per_kg", "h_out_per_kg", "W_pump_expected"]
 
 
 def main() -> None:
@@ -63,19 +34,14 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=50_000)
     parser.add_argument("--batch", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument(
-        "--n-col",
-        type=int,
-        default=10_000,
-        help="Number of physics collocation points (LHS, no labels)",
-    )
-    parser.add_argument(
-        "--lambda-e", type=float, default=1.0, help="Weight for energy-balance physics loss"
-    )
-    parser.add_argument(
-        "--lambda-p", type=float, default=1.0, help="Weight for pump-work physics loss"
-    )
-    parser.add_argument("--patience", type=int, default=2000, help="Early-stop patience in steps")
+    parser.add_argument("--warmup", type=int, default=1_000)
+    parser.add_argument("--weight-decay", type=float, default=1e-5)
+    parser.add_argument("--ema-decay", type=float, default=0.999)
+    parser.add_argument("--patience", type=int, default=4_000)
+    # Accepted-but-ignored v1.1 args
+    parser.add_argument("--n-col", type=int, default=0)
+    parser.add_argument("--lambda-e", type=float, default=0.0)
+    parser.add_argument("--lambda-p", type=float, default=0.0)
     args = parser.parse_args()
 
     try:
@@ -85,14 +51,15 @@ def main() -> None:
     print(f"git_sha={git_sha}  {args}")
 
     df = pd.read_parquet(PROCESSED_DIR / "train.parquet")
-    missing_cols = sorted(set(INPUT_COLS + OUTPUT_COLS + PHYSICS_COLS) - set(df.columns))
-    if missing_cols:
+    needed = INPUT_COLS + OUTPUT_COLS + AUX_COLS
+    missing = sorted(set(needed) - set(df.columns))
+    if missing:
         raise SystemExit(
-            "Training set is missing v1.1 columns "
-            f"{missing_cols}. Rebuild it with `uv run python scripts/02_build_dataset.py`."
+            f"Training set missing columns {missing}. "
+            "Rebuild it with `uv run python scripts/02_build_dataset.py`."
         )
 
-    # -- 80 / 10 / 10 train / val / test split ----------------------------------
+    # 80 / 10 / 10 split
     rng = np.random.default_rng(42)
     idx = rng.permutation(len(df))
     n_train = int(0.8 * len(df))
@@ -102,9 +69,9 @@ def main() -> None:
     df_test = df.iloc[idx[n_train + n_val :]]
     print(f"Split: {len(df_train)} train / {len(df_val)} val / {len(df_test)} test")
 
-    # -- Scaler from training set only ------------------------------------------
     X_train_np = df_train[INPUT_COLS].values.astype(np.float32)
     y_train_np = df_train[OUTPUT_COLS].values.astype(np.float32)
+    aux_train_np = df_train[AUX_COLS].values.astype(np.float32)
 
     x_mean = torch.tensor(X_train_np.mean(0), dtype=torch.float32)
     x_std = torch.tensor(X_train_np.std(0) + 1e-8, dtype=torch.float32)
@@ -114,78 +81,43 @@ def main() -> None:
 
     X_train = (torch.tensor(X_train_np) - x_mean) / x_std
     y_train = (torch.tensor(y_train_np) - y_mean) / y_std
+    aux_train = torch.tensor(aux_train_np)
 
-    # Pump work expected (analytical, from training data)
-    W_pump_expected = torch.tensor(df_train[PUMP_COL].values.astype(np.float32))
-
-    # -- Validation tensors -----------------------------------------------------
     X_val_np = df_val[INPUT_COLS].values.astype(np.float32)
     y_val_np = df_val[OUTPUT_COLS].values.astype(np.float32)
+    aux_val_np = df_val[AUX_COLS].values.astype(np.float32)
     X_val = (torch.tensor(X_val_np) - x_mean) / x_std
     y_val = (torch.tensor(y_val_np) - y_mean) / y_std
+    aux_val = torch.tensor(aux_val_np)
 
-    # -- Collocation: fresh LHS over full input bounding box (A5) ---------------
-    # These points have NO CoolProp labels - only physics residuals are evaluated.
-    print("Generating LHS collocation points...")
-    from scipy.stats.qmc import LatinHypercube
-
-    sampler = LatinHypercube(d=8, seed=99)
-    col_lhs = sampler.random(args.n_col).astype(np.float32)
-    col_comp = _sample_compositions(col_lhs[:, :5])
-    col_m = BOUNDS["m_dot"][0] + col_lhs[:, 5] * (BOUNDS["m_dot"][1] - BOUNDS["m_dot"][0])
-    col_Ta = BOUNDS["T_amb"][0] + col_lhs[:, 6] * (BOUNDS["T_amb"][1] - BOUNDS["T_amb"][0])
-    col_Ts = BOUNDS["T_sw"][0] + col_lhs[:, 7] * (BOUNDS["T_sw"][1] - BOUNDS["T_sw"][0])
-    col_np = np.column_stack(
-        [col_comp, col_m[:, None], col_Ta[:, None], col_Ts[:, None]]
-    ).astype(np.float32)
-    X_col = (torch.tensor(col_np) - x_mean) / x_std
-
-    # Sanity-check: < 1% of collocation points should coincide with training data
-    col_set = set(map(tuple, col_np[:, :6].round(6).tolist()))
-    train_set = set(map(tuple, X_train_np[:, :6].round(6).tolist()))
-    overlap = len(col_set & train_set) / len(col_set)
-    print(f"Collocation-training overlap: {overlap:.3%} (should be < 1%)")
-
-    # Pre-compute h_in / h_out for collocation points (needed for energy-balance residual)
-    h_in_col_np, h_out_col_np, valid_mask = _compute_h_in_out_col(col_np[:, :6])
-    n_invalid = int((~valid_mask).sum())
-    if n_invalid:
-        print(f"  Dropping {n_invalid} collocation points not liquid at storage conditions")
-        col_np = col_np[valid_mask]
-        X_col  = X_col[valid_mask]
-        h_in_col_np  = h_in_col_np[valid_mask]
-        h_out_col_np = h_out_col_np[valid_mask]
-    h_in_col  = torch.tensor(h_in_col_np)
-    h_out_col = torch.tensor(h_out_col_np)
-
-    # -- Train ------------------------------------------------------------------
     model = train(
         X_train,
         y_train,
-        X_col,
-        h_in_col,
-        h_out_col,
-        W_pump_expected,
+        aux_train,
         scaler,
         X_val=X_val,
         y_val=y_val,
+        aux_val=aux_val,
         n_steps=args.steps,
         batch_size=args.batch,
         lr=args.lr,
-        lambda_energy=args.lambda_e,
-        lambda_pump=args.lambda_p,
+        weight_decay=args.weight_decay,
+        warmup_steps=args.warmup,
+        ema_decay=args.ema_decay,
         patience=args.patience,
     )
     print("Checkpoint saved to results/models/pinn_v1.pt")
 
-    # -- Evaluate on held-out test set ------------------------------------------
+    # Evaluate on held-out test set
     X_test_np = df_test[INPUT_COLS].values.astype(np.float32)
     y_test_np = df_test[OUTPUT_COLS].values.astype(np.float32)
+    aux_test_np = df_test[AUX_COLS].values.astype(np.float32)
     X_test = (torch.tensor(X_test_np) - x_mean) / x_std
+    aux_test = torch.tensor(aux_test_np)
 
     model.eval()
     with torch.no_grad():
-        y_pred_test = scaler.unscale_y(model(X_test)).numpy()
+        y_pred_test = scaler.unscale_y(model(X_test, aux_test, scaler=scaler)).numpy()
 
     eval_records = []
     for i, col in enumerate(OUTPUT_COLS):

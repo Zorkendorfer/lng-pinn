@@ -14,7 +14,7 @@ import torch
 from scipy.optimize import Bounds, LinearConstraint, milp
 from scipy.sparse import csr_matrix, vstack
 
-from lng_pinn.pinn import PINNMLP, Scaler
+from lng_pinn.pinn import PINNMLP, Scaler, build_aux
 
 N_FLOW_LEVELS = 15  # discretisation resolution
 M_DOT_MIN = 10.0  # kg/s — minimum stable turndown
@@ -56,9 +56,14 @@ def _pinn_cost_table(
         [base_rep[:, :6], m_rep[:, None], base_rep[:, 6:]], axis=1
     )  # (T*L, 9): comp + m_dot + T_amb + T_sw
 
+    # Build aux (h_in, h_out, W_pump_expected) for all (T*L) points.
+    # composition_aux is cached per unique composition so this is cheap even
+    # when L = 15 flow levels are tiled across the same composition.
+    aux = build_aux(X_np[:, :6], X_np[:, 6])  # (T*L, 3)
+
     with torch.no_grad():
         X = torch.from_numpy(X_np)
-        W_total = scaler.unscale_y(model(scaler.scale_x(X)))[:, 1].numpy()  # (T*L,)
+        W_total = scaler.unscale_y(model(scaler.scale_x(X), aux, scaler=scaler))[:, 1].numpy()  # (T*L,)
 
     W_total = W_total.reshape(T, L)  # (T, L)
     price = horizon_df["price_eur_mwh"].values[:, None]  # (T, 1)

@@ -128,7 +128,9 @@ def _eval_true_costs(
         ):
             true_costs[futures[future]] = future.result()
     joined["true_cost_eur"] = [v if v is not None else np.nan for v in true_costs]
-    return joined[["m_dot", "cost_eur", "true_cost_eur"]].dropna()
+    out = joined[["m_dot", "cost_eur", "true_cost_eur"]].dropna()
+    out.index.name = "time"
+    return out
 
 
 def build_true_cost_summary(
@@ -139,11 +141,18 @@ def build_true_cost_summary(
     true_dfs = {}
     for name, df in strategy_dfs.items():
         path = RESULTS_DIR / f"true_costs_{name}.parquet"
+        cached: pd.DataFrame | None = None
         if path.exists():
-            true_dfs[name] = pd.read_parquet(path)
+            cached = pd.read_parquet(path)
+            # Older caches were saved without the time index — discard them so
+            # they get regenerated with proper datetime indexing for resample().
+            if not isinstance(cached.index, pd.DatetimeIndex):
+                cached = None
+        if cached is not None:
+            true_dfs[name] = cached
         else:
             true_dfs[name] = _eval_true_costs(df, ts_df, name)
-            true_dfs[name].to_parquet(path, index=False)
+            true_dfs[name].to_parquet(path)  # preserve the time index
 
     yearly = pd.DataFrame({
         name: true_dfs[name]["true_cost_eur"].resample("YE").sum()
