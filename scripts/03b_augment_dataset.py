@@ -26,7 +26,6 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from tqdm import tqdm
 

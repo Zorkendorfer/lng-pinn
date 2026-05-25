@@ -88,11 +88,26 @@ def _run_dispatch_for_price(
 
         cp = carbon_price
         scheds = {
-            "aware":    optimize(window, model, scaler, demand_kg, inv["aware"], carbon_price_eur_per_t=cp),
-            "horizon":  optimize_blind_horizon(window, model, scaler, demand_kg, inv["horizon"], carbon_price_eur_per_t=cp),
-            "lagged":   optimize_blind_lagged(window, model, scaler, demand_kg, lagged_composition, inv["lagged"], carbon_price_eur_per_t=cp),
-            "annual":   optimize_blind_annual(window, model, scaler, demand_kg, annual_composition, inv["annual"], carbon_price_eur_per_t=cp),
-            "constant": optimize_constant_flow(window, model, scaler, demand_kg, inv["constant"], carbon_price_eur_per_t=cp),
+            "aware": optimize(
+                window, model, scaler, demand_kg, inv["aware"],
+                carbon_price_eur_per_t=cp,
+            ),
+            "horizon": optimize_blind_horizon(
+                window, model, scaler, demand_kg, inv["horizon"],
+                carbon_price_eur_per_t=cp,
+            ),
+            "lagged": optimize_blind_lagged(
+                window, model, scaler, demand_kg, lagged_composition, inv["lagged"],
+                carbon_price_eur_per_t=cp,
+            ),
+            "annual": optimize_blind_annual(
+                window, model, scaler, demand_kg, annual_composition, inv["annual"],
+                carbon_price_eur_per_t=cp,
+            ),
+            "constant": optimize_constant_flow(
+                window, model, scaler, demand_kg, inv["constant"],
+                carbon_price_eur_per_t=cp,
+            ),
         }
 
         for s, sched in scheds.items():
@@ -131,8 +146,12 @@ def _true_cost_for_strategy(
 def _yearly_savings(true_costs: dict[str, pd.Series]) -> pd.DataFrame:
     """Aware-vs-horizon true-cost saving per year."""
     yearly = pd.DataFrame({s: true_costs[s].resample("YE").sum() for s in STRATEGIES}).dropna()
-    yearly["saving_vs_horizon_pct"] = (yearly["horizon"] - yearly["aware"]) / yearly["horizon"] * 100
-    yearly["saving_vs_lagged_pct"] = (yearly["lagged"] - yearly["aware"]) / yearly["lagged"] * 100
+    yearly["saving_vs_horizon_pct"] = (
+        (yearly["horizon"] - yearly["aware"]) / yearly["horizon"] * 100
+    )
+    yearly["saving_vs_lagged_pct"] = (
+        (yearly["lagged"] - yearly["aware"]) / yearly["lagged"] * 100
+    )
     yearly = yearly.reset_index()
     yearly["year"] = pd.to_datetime(yearly["time"], utc=True).dt.year
     return yearly.drop(columns=["time"])

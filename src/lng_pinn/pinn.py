@@ -48,10 +48,10 @@ Training improvements
 
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -521,7 +521,10 @@ def train(
 
         # A1: relative-cost loss, applied directly (not uncertainty-weighted) so
         # it acts as a calibration term independent of the Kendall weights drifting.
-        loss_cost = relative_cost_loss(y_pred, yb, scaler) if lambda_cost > 0 else torch.zeros((), device=device)
+        if lambda_cost > 0:
+            loss_cost = relative_cost_loss(y_pred, yb, scaler)
+        else:
+            loss_cost = torch.zeros((), device=device)
         loss = loss_mt + lambda_cost * loss_cost
 
         optimizer.zero_grad()
@@ -577,7 +580,8 @@ def train(
     ema.apply_to(model)
     if best_state is not None and X_val is not None:
         with torch.no_grad():
-            ema_val = (model(X_val, aux_val, scaler=scaler)[:, 1] - y_val[:, 1]).pow(2).mean().item()  # type: ignore[arg-type, index]
+            y_pred_v = model(X_val, aux_val, scaler=scaler)  # type: ignore[arg-type]
+            ema_val = (y_pred_v[:, 1] - y_val[:, 1]).pow(2).mean().item()  # type: ignore[index]
         if best_val < ema_val:
             model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
 
@@ -608,8 +612,8 @@ def train(
 
 
 def build_aux(
-    comp: "np.ndarray | Tensor",
-    m_dot: "np.ndarray | Tensor",
+    comp: np.ndarray | Tensor,
+    m_dot: np.ndarray | Tensor,
 ) -> Tensor:
     """Build the (B, 3) aux tensor required by ``PINNMLP.forward``.
 
@@ -621,8 +625,6 @@ def build_aux(
     so calling this with many flow levels at the same composition is
     cheap (one HEOS state init per unique composition).
     """
-    import numpy as np
-
     from lng_pinn.plant import P_IN, P_OUT_DEFAULT, pump_efficiency
     from lng_pinn.thermo import composition_aux
 

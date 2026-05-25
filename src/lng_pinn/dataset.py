@@ -275,10 +275,14 @@ def append_trajectory_rows(
     key_cols = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2", "m_dot", "T_amb", "T_sw"]
     # Round to a tolerance bucket so near-duplicates collapse.
     decimals = max(0, int(round(-np.log10(dedupe_tol))))
-    existing_keys = {tuple(np.round(existing[key_cols].values[i], decimals)) for i in range(len(existing))}
+    existing_arr = existing[key_cols].values
+    existing_keys = {
+        tuple(np.round(existing_arr[i], decimals)) for i in range(len(existing_arr))
+    }
+    new_arr = new_df[key_cols].values
     keep_mask = np.array([
-        tuple(np.round(new_df[key_cols].values[i], decimals)) not in existing_keys
-        for i in range(len(new_df))
+        tuple(np.round(new_arr[i], decimals)) not in existing_keys
+        for i in range(len(new_arr))
     ])
     new_df = new_df.loc[keep_mask].reset_index(drop=True)
     if len(new_df) == 0:

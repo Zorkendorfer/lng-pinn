@@ -71,7 +71,8 @@ def _pinn_cost_table(
 
     with torch.no_grad():
         X = torch.from_numpy(X_np)
-        W_total = scaler.unscale_y(model(scaler.scale_x(X), aux, scaler=scaler))[:, 1].numpy()  # (T*L,)
+        y_pred = scaler.unscale_y(model(scaler.scale_x(X), aux, scaler=scaler))
+        W_total = y_pred[:, 1].numpy()  # (T*L,)
 
     W_total = W_total.reshape(T, L)  # (T, L)
     price = horizon_df["price_eur_mwh"].values[:, None]  # (T, 1)
