@@ -75,8 +75,13 @@ def test_energy_balance_closes_within_half_percent() -> None:
     out  = simulate(comp, m_dot=40.0, T_amb=285.0, T_sw=T_sw)
 
     state = get_state(comp)
+    # At (1 bar, 111 K) the PT flash sits on the saturation envelope; without
+    # phase forcing CoolProp can return the vapor root. The plant model uses
+    # iphase_liquid here, so the test must do the same to compare like-for-like.
+    state.specify_phase(CP.iphase_liquid)
     state.update(CP.PT_INPUTS, P_IN, T_IN)
     h_in  = state.hmolar() / state.molar_mass()   # J/kg
+    state.unspecify_phase()
     state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
     h_out = state.hmolar() / state.molar_mass()   # J/kg
 
