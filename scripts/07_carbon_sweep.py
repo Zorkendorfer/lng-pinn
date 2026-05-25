@@ -76,7 +76,10 @@ def _run_dispatch_for_price(
     records: dict[str, list[dict]] = {s: [] for s in STRATEGIES}
     inv = {s: INV_INITIAL for s in STRATEGIES}
 
-    pbar = tqdm(starts, desc=f"  co2={carbon_price:.0f}", unit="day")
+    pbar = tqdm(
+        starts, desc=f"  dispatch co2={carbon_price:.0f}", unit="day",
+        position=1, leave=False,
+    )
     for start in pbar:
         if start > 0 and start % cargo_cycle_hours == 0:
             for s in STRATEGIES:
@@ -126,11 +129,18 @@ def _true_cost_for_strategy(
     dispatch_df: pd.DataFrame,
     ts_df: pd.DataFrame,
     carbon_price: float,
+    label: str = "",
 ) -> pd.Series:
     """CoolProp ground-truth cost (electricity + carbon) per hour."""
     joined = dispatch_df.join(ts_df, how="inner")
     out: list[float] = []
-    for row in joined.itertuples():
+    desc = f"  true-cost {label}" if label else "  true-cost"
+    iterator = tqdm(
+        joined.itertuples(), total=len(joined),
+        desc=desc, unit="hr",
+        position=1, leave=False,
+    )
+    for row in iterator:
         comp = tuple(float(getattr(row, c)) for c in COMP_COLS)
         try:
             res = simulate(comp, float(row.m_dot), float(row.T_amb), float(row.T_sw))
@@ -181,17 +191,24 @@ def main() -> None:
     ts.index = pd.to_datetime(ts.index, utc=True)
 
     all_rows: list[pd.DataFrame] = []
-    for price in args.prices:
+    price_pbar = tqdm(args.prices, desc="Prices", unit="price", position=0)
+    for price in price_pbar:
+        price_pbar.set_postfix_str(f"co2={price:.0f} EUR/t")
         cache_path = RESULTS_DIR / f"carbon_sweep_co2_{int(price)}.csv"
         if cache_path.exists() and not args.no_resume:
-            print(f"  co2={price:.0f}: using cached {cache_path.name}")
+            tqdm.write(f"  co2={price:.0f}: using cached {cache_path.name}")
             yearly = pd.read_csv(cache_path)
         else:
-            print(f"  co2={price:.0f}: running full backtest...")
+            tqdm.write(f"  co2={price:.0f}: phase 1/2 — running dispatch backtest...")
             scheds = _run_dispatch_for_price(ts, model, scaler, price)
-            true_costs = {s: _true_cost_for_strategy(scheds[s], ts, price) for s in STRATEGIES}
+            tqdm.write(f"  co2={price:.0f}: phase 2/2 — CoolProp re-evaluation of 5 strategies...")
+            true_costs = {
+                s: _true_cost_for_strategy(scheds[s], ts, price, label=s)
+                for s in STRATEGIES
+            }
             yearly = _yearly_savings(true_costs)
             yearly["price_co2_eur_per_t"] = price
+            tqdm.write(f"  co2={price:.0f}: done. Saving {cache_path.name}")
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             yearly.to_csv(cache_path, index=False)
         if "price_co2_eur_per_t" not in yearly.columns:
