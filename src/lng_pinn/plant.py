@@ -70,15 +70,17 @@ def simulate(
     x = tuple(composition)
     state = get_state(x)
 
-    # --- Inlet state (saturated liquid) ---
-    # specify_phase avoids solver divergence when the singleton was previously at high P.
-    state.specify_phase(CP.iphase_liquid)
-    state.update(CP.PT_INPUTS, P_IN, T_IN)
+    # --- Inlet state (saturated liquid at storage pressure) ---
+    # LNG storage is saturated-liquid at tank pressure; T_IN is the bubble point,
+    # not an independent variable. Setting (P_IN, T_IN) directly with PT_INPUTS
+    # produces gas-phase density (~10 kg/m^3) for high-N2 mixtures whose bubble
+    # point at P_IN sits below the hardcoded T_IN=111 K. PQ_INPUTS with Q=0
+    # pins us to the bubble point regardless of composition.
+    state.update(CP.PQ_INPUTS, P_IN, 0.0)
     h_in = state.hmolar()    # J/mol
     s_in = state.smolar()    # J/(mol*K)
     rho_in = state.rhomass() # kg/m^3
     mw = state.molar_mass()  # kg/mol
-    state.unspecify_phase()
 
     # --- Pump: isentropic work, corrected for flow-dependent efficiency ---
     # Approximation: liquid is incompressible, v ~ 1/rho_in

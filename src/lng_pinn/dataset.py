@@ -71,16 +71,17 @@ def _simulate_one(args: tuple[Any, ...]) -> dict[str, float] | None:
         # CoolProp can't find a density solution (two-phase or near-critical region)
         return None
 
-    # Enthalpy at storage and send-out conditions (needed for PINN energy balance loss)
+    # Enthalpy at storage and send-out conditions (needed for PINN energy balance loss).
+    # Storage is saturated liquid at P_IN (PQ_INPUTS with Q=0); doing PT_INPUTS at a
+    # fixed T_IN=111 K returns gas-phase density for high-N2 mixtures whose bubble
+    # point sits below 111 K.
     try:
         state = get_state(x)
-        state.specify_phase(CP.iphase_liquid)
-        state.update(CP.PT_INPUTS, P_IN, T_IN)
-        h_in_per_kg = state.hmolar() / state.molar_mass()   # J/kg
+        state.update(CP.PQ_INPUTS, P_IN, 0.0)
+        h_in_per_kg = state.hmolar() / state.molar_mass()    # J/kg
         rho_in = state.rhomass()                             # kg/m^3
-        state.unspecify_phase()
         state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
-        h_out_per_kg = state.hmolar() / state.molar_mass()  # J/kg
+        h_out_per_kg = state.hmolar() / state.molar_mass()   # J/kg
     except ValueError:
         return None  # composition not liquid at storage conditions
 

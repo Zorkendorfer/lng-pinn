@@ -76,7 +76,7 @@ def _run_dispatch_for_price(
     records: dict[str, list[dict]] = {s: [] for s in STRATEGIES}
     inv = {s: INV_INITIAL for s in STRATEGIES}
 
-    pbar = tqdm(starts, desc=f"  co2={carbon_price:.0f}", unit="day", leave=False)
+    pbar = tqdm(starts, desc=f"  co2={carbon_price:.0f}", unit="day")
     for start in pbar:
         if start > 0 and start % cargo_cycle_hours == 0:
             for s in STRATEGIES:

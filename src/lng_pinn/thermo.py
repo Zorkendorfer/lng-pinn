@@ -30,24 +30,25 @@ MW_SPECIES = {  # g/mol — must align with SPECIES order below
 }
 _C_PER_MOL = (1, 2, 3, 4, 4, 0)  # carbons per molecule, aligned with SPECIES
 
-_STATE: Any = None
-
-
 def _fluid_str() -> str:
     return "&".join(SPECIES)
 
 
 def get_state(x: tuple[float, ...]) -> Any:
-    """Return the singleton AbstractState configured for composition x.
+    """Return a fresh AbstractState configured for composition x.
 
-    The same C++ object is reused across calls; mole fractions are reset
-    each time. Not thread-safe — adequate for single-threaded simulation.
+    Earlier versions cached this as a singleton to amortise the ~0.1s
+    HEOS init. The singleton turned out to leak internal solver state
+    across calls: for ~25% of training compositions the sequence
+    (PT_INPUTS storage) → (PT_INPUTS send-out) returned gas-phase
+    density at storage conditions instead of liquid, producing
+    W_pump values ~30× too high. Fresh state per call eliminates
+    the contamination at ~250s extra cost for a 25k-row dataset
+    build (parallelised across CPU workers).
     """
-    global _STATE
-    if _STATE is None:
-        _STATE = CP.AbstractState("HEOS", _fluid_str())
-    _STATE.set_mole_fractions(list(x))
-    return _STATE
+    state = CP.AbstractState("HEOS", _fluid_str())
+    state.set_mole_fractions(list(x))
+    return state
 
 
 @dataclass(frozen=True)
@@ -90,11 +91,12 @@ def composition_aux(composition: tuple[float, ...]) -> tuple[float, float, float
     if cached is not None:
         return cached
     state = get_state(composition)
-    state.specify_phase(CP.iphase_liquid)
-    state.update(CP.PT_INPUTS, P_IN, T_IN)
+    # Saturated liquid at storage pressure — PQ_INPUTS pins us to the bubble
+    # point regardless of composition. PT_INPUTS at fixed T_IN=111 K returns
+    # gas-phase density for high-N2 mixtures.
+    state.update(CP.PQ_INPUTS, P_IN, 0.0)
     h_in = state.hmolar() / state.molar_mass()
     rho_in = state.rhomass()
-    state.unspecify_phase()
     state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
     h_out = state.hmolar() / state.molar_mass()
     result = (float(h_in), float(h_out), float(rho_in))
