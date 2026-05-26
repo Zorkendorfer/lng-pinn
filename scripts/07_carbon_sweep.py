@@ -56,7 +56,7 @@ def _run_dispatch_for_price(
     model: object,
     scaler: object,
     carbon_price: float,
-    quiet: bool = False,
+    tqdm_position: int = 1,
 ) -> dict[str, pd.DataFrame]:
     """Run all 5 strategies on the full timeseries at one carbon price.
 
@@ -65,8 +65,9 @@ def _run_dispatch_for_price(
     (electricity + carbon term); true-cost evaluation happens in a
     second pass via CoolProp.
 
-    When run as a subprocess worker (parallel-price mode), pass ``quiet=True``
-    so the per-window tqdm bar does not collide with sibling workers' bars.
+    ``tqdm_position`` controls the terminal row the per-window bar occupies —
+    siblings in parallel-price mode pass distinct positions so their bars
+    stack instead of overwriting each other.
     """
     H = HORIZON_DAYS * 24
     step = 24
@@ -82,7 +83,7 @@ def _run_dispatch_for_price(
 
     pbar = tqdm(
         starts, desc=f"  dispatch co2={carbon_price:.0f}", unit="day",
-        position=1, leave=False, disable=quiet,
+        position=tqdm_position, leave=False,
     )
     for start in pbar:
         if start > 0 and start % cargo_cycle_hours == 0:
@@ -158,13 +159,14 @@ def _true_cost_for_strategy(
     carbon_price: float,
     label: str = "",
     n_workers: int | None = None,
-    quiet: bool = False,
+    tqdm_position: int = 1,
 ) -> pd.Series:
     """CoolProp ground-truth cost (electricity + carbon) per hour.
 
     Parallelised across processes. Falls back to serial when ``n_workers == 1``
-    (useful for debugging and tiny inputs). Pass ``quiet=True`` from
-    sweep-level workers so the per-row tqdm bar does not collide with siblings.
+    (useful for debugging and tiny inputs). ``tqdm_position`` matches the
+    dispatch bar's position so siblings in parallel-price mode each keep a
+    single, stable terminal row.
     """
     joined = dispatch_df.join(ts_df, how="inner")
     n = len(joined)
@@ -188,7 +190,7 @@ def _true_cost_for_strategy(
 
     if n_workers <= 1:
         for i, a in enumerate(tqdm(
-            arg_list, desc=desc, unit="hr", position=1, leave=False, disable=quiet,
+            arg_list, desc=desc, unit="hr", position=tqdm_position, leave=False,
         )):
             results[i] = _true_cost_row(a)
     else:
@@ -196,7 +198,7 @@ def _true_cost_for_strategy(
             futures = {executor.submit(_true_cost_row, a): i for i, a in enumerate(arg_list)}
             for future in tqdm(
                 as_completed(futures), total=n,
-                desc=desc, unit="hr", position=1, leave=False, disable=quiet,
+                desc=desc, unit="hr", position=tqdm_position, leave=False,
             ):
                 results[futures[future]] = future.result()
 
@@ -208,13 +210,15 @@ def _process_one_price(
     price: float,
     no_resume: bool,
     inner_workers: int,
+    slot: int = 0,
 ) -> pd.DataFrame:
     """Self-contained worker: dispatch + true-cost re-eval for one carbon price.
 
     Loads the model and timeseries inside the worker so the parent doesn't
-    have to pickle them across the process boundary. Inner tqdm bars are
-    suppressed (quiet=True) since multiple workers run concurrently and
-    their bars would collide on the same terminal lines.
+    have to pickle them across the process boundary. ``slot`` is the worker's
+    assigned tqdm row (position = slot + 1; the parent's "Prices" bar owns
+    position 0), letting every concurrent worker keep its own stable progress
+    line instead of overwriting siblings.
     """
     cache_path = RESULTS_DIR / f"carbon_sweep_co2_{int(price)}.csv"
     if cache_path.exists() and not no_resume:
@@ -228,10 +232,12 @@ def _process_one_price(
     ts = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
     ts.index = pd.to_datetime(ts.index, utc=True)
 
-    scheds = _run_dispatch_for_price(ts, model, scaler, price, quiet=True)
+    pos = slot + 1
+    scheds = _run_dispatch_for_price(ts, model, scaler, price, tqdm_position=pos)
     true_costs = {
         s: _true_cost_for_strategy(
-            scheds[s], ts, price, label=s, n_workers=inner_workers, quiet=True,
+            scheds[s], ts, price, label=s,
+            n_workers=inner_workers, tqdm_position=pos,
         )
         for s in STRATEGIES
     }
@@ -328,17 +334,22 @@ def main() -> None:
         # model + timeseries). Inner tqdm bars are silenced; only the outer
         # "Prices" bar advances as workers complete.
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            # Slot = price index modulo n_workers — gives each concurrently
+            # running worker a distinct tqdm row even when more prices than
+            # workers exist (later tasks reuse a freed row).
             futures = {
                 executor.submit(
-                    _process_one_price, float(price), args.no_resume, inner_workers,
+                    _process_one_price,
+                    float(price), args.no_resume, inner_workers, i % n_workers,
                 ): float(price)
-                for price in args.prices
+                for i, price in enumerate(args.prices)
             }
             for future in tqdm(
                 as_completed(futures),
                 total=len(futures),
                 desc="Prices (parallel)",
                 unit="price",
+                position=0,
             ):
                 price = futures[future]
                 try:
