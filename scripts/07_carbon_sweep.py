@@ -56,6 +56,7 @@ def _run_dispatch_for_price(
     model: object,
     scaler: object,
     carbon_price: float,
+    quiet: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """Run all 5 strategies on the full timeseries at one carbon price.
 
@@ -63,6 +64,9 @@ def _run_dispatch_for_price(
     indexed by time]. The returned cost_eur is the PINN's prediction
     (electricity + carbon term); true-cost evaluation happens in a
     second pass via CoolProp.
+
+    When run as a subprocess worker (parallel-price mode), pass ``quiet=True``
+    so the per-window tqdm bar does not collide with sibling workers' bars.
     """
     H = HORIZON_DAYS * 24
     step = 24
@@ -78,7 +82,7 @@ def _run_dispatch_for_price(
 
     pbar = tqdm(
         starts, desc=f"  dispatch co2={carbon_price:.0f}", unit="day",
-        position=1, leave=False,
+        position=1, leave=False, disable=quiet,
     )
     for start in pbar:
         if start > 0 and start % cargo_cycle_hours == 0:
@@ -154,12 +158,13 @@ def _true_cost_for_strategy(
     carbon_price: float,
     label: str = "",
     n_workers: int | None = None,
+    quiet: bool = False,
 ) -> pd.Series:
     """CoolProp ground-truth cost (electricity + carbon) per hour.
 
-    Parallelised across processes — on M-series, 8+ cores give ~6–8× speedup
-    over the previous serial implementation. Falls back to serial when
-    ``n_workers == 1`` (useful for debugging and tiny inputs).
+    Parallelised across processes. Falls back to serial when ``n_workers == 1``
+    (useful for debugging and tiny inputs). Pass ``quiet=True`` from
+    sweep-level workers so the per-row tqdm bar does not collide with siblings.
     """
     joined = dispatch_df.join(ts_df, how="inner")
     n = len(joined)
@@ -182,19 +187,59 @@ def _true_cost_for_strategy(
     results: list[float | None] = [None] * n
 
     if n_workers <= 1:
-        for i, a in enumerate(tqdm(arg_list, desc=desc, unit="hr", position=1, leave=False)):
+        for i, a in enumerate(tqdm(
+            arg_list, desc=desc, unit="hr", position=1, leave=False, disable=quiet,
+        )):
             results[i] = _true_cost_row(a)
     else:
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = {executor.submit(_true_cost_row, a): i for i, a in enumerate(arg_list)}
             for future in tqdm(
                 as_completed(futures), total=n,
-                desc=desc, unit="hr", position=1, leave=False,
+                desc=desc, unit="hr", position=1, leave=False, disable=quiet,
             ):
                 results[futures[future]] = future.result()
 
     out = [r if r is not None else np.nan for r in results]
     return pd.Series(out, index=joined.index, name="true_cost_eur")
+
+
+def _process_one_price(
+    price: float,
+    no_resume: bool,
+    inner_workers: int,
+) -> pd.DataFrame:
+    """Self-contained worker: dispatch + true-cost re-eval for one carbon price.
+
+    Loads the model and timeseries inside the worker so the parent doesn't
+    have to pickle them across the process boundary. Inner tqdm bars are
+    suppressed (quiet=True) since multiple workers run concurrently and
+    their bars would collide on the same terminal lines.
+    """
+    cache_path = RESULTS_DIR / f"carbon_sweep_co2_{int(price)}.csv"
+    if cache_path.exists() and not no_resume:
+        yearly = pd.read_csv(cache_path)
+        if "price_co2_eur_per_t" not in yearly.columns:
+            yearly["price_co2_eur_per_t"] = price
+        return yearly
+
+    model, scaler = load()
+    model.eval()
+    ts = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
+    ts.index = pd.to_datetime(ts.index, utc=True)
+
+    scheds = _run_dispatch_for_price(ts, model, scaler, price, quiet=True)
+    true_costs = {
+        s: _true_cost_for_strategy(
+            scheds[s], ts, price, label=s, n_workers=inner_workers, quiet=True,
+        )
+        for s in STRATEGIES
+    }
+    yearly = _yearly_savings(true_costs)
+    yearly["price_co2_eur_per_t"] = price
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    yearly.to_csv(cache_path, index=False)
+    return yearly
 
 
 def _yearly_savings(true_costs: dict[str, pd.Series]) -> pd.DataFrame:
@@ -221,45 +266,93 @@ def main() -> None:
         "--no-resume", action="store_true",
         help="Ignore per-price cached CSVs and recompute every point.",
     )
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help=(
+            "Parallel processes across carbon prices. Default 1 (serial). "
+            "Inner CoolProp pool auto-scales to floor(cpu_count / workers) per "
+            "outer worker so total CPU usage stays sane."
+        ),
+    )
     args = parser.parse_args()
 
     try:
         git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     except Exception:
         git_sha = "unknown"
-    print(f"git_sha={git_sha}  prices={args.prices}")
 
-    model, scaler = load()
-    model.eval()
-    ts = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
-    ts.index = pd.to_datetime(ts.index, utc=True)
+    total_cores = max(1, os.cpu_count() or 1)
+    n_workers = max(1, min(args.workers, len(args.prices)))
+    inner_workers = max(1, total_cores // n_workers)
+    print(
+        f"git_sha={git_sha}  prices={args.prices}  "
+        f"workers={n_workers} (inner CoolProp pool ≈ {inner_workers} per worker)"
+    )
 
     all_rows: list[pd.DataFrame] = []
-    price_pbar = tqdm(args.prices, desc="Prices", unit="price", position=0)
-    for price in price_pbar:
-        price_pbar.set_postfix_str(f"co2={price:.0f} EUR/t")
-        cache_path = RESULTS_DIR / f"carbon_sweep_co2_{int(price)}.csv"
-        if cache_path.exists() and not args.no_resume:
-            tqdm.write(f"  co2={price:.0f}: using cached {cache_path.name}")
-            yearly = pd.read_csv(cache_path)
-        else:
-            tqdm.write(f"  co2={price:.0f}: phase 1/2 — running dispatch backtest...")
-            scheds = _run_dispatch_for_price(ts, model, scaler, price)
-            tqdm.write(f"  co2={price:.0f}: phase 2/2 — CoolProp re-evaluation of 5 strategies...")
-            true_costs = {
-                s: _true_cost_for_strategy(scheds[s], ts, price, label=s)
-                for s in STRATEGIES
+
+    if n_workers == 1:
+        # Serial path — keep the rich per-phase logging.
+        model, scaler = load()
+        model.eval()
+        ts = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
+        ts.index = pd.to_datetime(ts.index, utc=True)
+
+        price_pbar = tqdm(args.prices, desc="Prices", unit="price", position=0)
+        for price in price_pbar:
+            price_pbar.set_postfix_str(f"co2={price:.0f} EUR/t")
+            cache_path = RESULTS_DIR / f"carbon_sweep_co2_{int(price)}.csv"
+            if cache_path.exists() and not args.no_resume:
+                tqdm.write(f"  co2={price:.0f}: using cached {cache_path.name}")
+                yearly = pd.read_csv(cache_path)
+            else:
+                tqdm.write(f"  co2={price:.0f}: phase 1/2 — running dispatch backtest...")
+                scheds = _run_dispatch_for_price(ts, model, scaler, price)
+                tqdm.write(
+                    f"  co2={price:.0f}: phase 2/2 — CoolProp re-evaluation of 5 strategies..."
+                )
+                true_costs = {
+                    s: _true_cost_for_strategy(scheds[s], ts, price, label=s)
+                    for s in STRATEGIES
+                }
+                yearly = _yearly_savings(true_costs)
+                yearly["price_co2_eur_per_t"] = price
+                tqdm.write(f"  co2={price:.0f}: done. Saving {cache_path.name}")
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                yearly.to_csv(cache_path, index=False)
+            if "price_co2_eur_per_t" not in yearly.columns:
+                yearly["price_co2_eur_per_t"] = price
+            all_rows.append(yearly)
+    else:
+        # Parallel-price path — each worker is self-contained (loads its own
+        # model + timeseries). Inner tqdm bars are silenced; only the outer
+        # "Prices" bar advances as workers complete.
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(
+                    _process_one_price, float(price), args.no_resume, inner_workers,
+                ): float(price)
+                for price in args.prices
             }
-            yearly = _yearly_savings(true_costs)
-            yearly["price_co2_eur_per_t"] = price
-            tqdm.write(f"  co2={price:.0f}: done. Saving {cache_path.name}")
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            yearly.to_csv(cache_path, index=False)
-        if "price_co2_eur_per_t" not in yearly.columns:
-            yearly["price_co2_eur_per_t"] = price
-        all_rows.append(yearly)
+            for future in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Prices (parallel)",
+                unit="price",
+            ):
+                price = futures[future]
+                try:
+                    yearly = future.result()
+                except Exception as exc:
+                    tqdm.write(f"  co2={price:.0f}: FAILED with {exc!r}")
+                    raise
+                tqdm.write(f"  co2={price:.0f}: done")
+                all_rows.append(yearly)
 
     sweep_df = pd.concat(all_rows, ignore_index=True)
+    # Sort so the figure / CSV are in price order regardless of completion order.
+    if "price_co2_eur_per_t" in sweep_df.columns:
+        sweep_df = sweep_df.sort_values(["price_co2_eur_per_t", "year"]).reset_index(drop=True)
     sweep_df.to_csv(RESULTS_DIR / "carbon_sweep.csv", index=False)
     fig_carbon_sweep(sweep_df)
     print("Saved results/figures/fig6_carbon_sweep.pdf and results/tables/carbon_sweep.csv")
