@@ -99,6 +99,8 @@ def _eval_true_cost_for_seed_strategy(
     carbon_price: float,
     resume: bool = True,
     ckpt_every: int = 2000,
+    n_workers: int | None = None,
+    tqdm_position: int = 1,
 ) -> pd.Series:
     """CoolProp ground-truth cost (EUR/h) per hour for one (seed, strategy).
 
@@ -133,13 +135,15 @@ def _eval_true_cost_for_seed_strategy(
 
     pending = [(i, a) for i, a in enumerate(arg_list) if i not in done]
     if pending:
-        n_workers = max(1, os.cpu_count() or 1)
+        if n_workers is None:
+            n_workers = max(1, os.cpu_count() or 1)
         completed_since_ckpt = 0
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
             futures = {executor.submit(_true_cost_row, a): i for i, a in pending}
             for future in tqdm(
                 as_completed(futures), total=len(pending),
-                desc=f"  true-cost seed={seed} {strategy}", unit="hr", leave=False,
+                desc=f"  true-cost seed={seed} {strategy}", unit="hr",
+                position=tqdm_position, leave=False,
             ):
                 i = futures[future]
                 cost = future.result()
@@ -231,6 +235,7 @@ def _run_backtest(
     resume: bool = True,
     ckpt_every: int = 20,
     carbon_price_eur_per_t: float = 0.0,
+    tqdm_position: int = 0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     H = HORIZON_DAYS * 24
     step = 24
@@ -255,7 +260,10 @@ def _run_backtest(
     flush_counter = 0
     last_completed = resume_start
 
-    pbar = tqdm(pending_starts, total=len(pending_starts), desc="  windows", leave=False)
+    pbar = tqdm(
+        pending_starts, total=len(pending_starts),
+        desc=f"  seed={seed} windows", position=tqdm_position, leave=False,
+    )
     for start in pbar:
         if start > 0 and start % CARGO_CYCLE_HOURS == 0:
             for s in STRATEGIES:
@@ -362,6 +370,92 @@ def _load_seed_result(
         return None
 
 
+def _process_one_seed(
+    seed: int,
+    no_resume: bool,
+    ckpt_every: int,
+    carbon_price: float,
+    inner_workers: int,
+    slot: int = 0,
+) -> list[dict]:
+    """Self-contained worker: dispatch + Phase-2 CoolProp re-eval for one seed.
+
+    Loads the model and timeseries inside the worker so the parent doesn't
+    pay for pickling them across the process boundary. ``slot`` gives this
+    worker a unique tqdm row so concurrent workers don't overwrite each
+    other's progress lines.
+
+    Returns the seed's contribution to ``all_records`` (one dict per year).
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+    resume = not no_resume
+    pos = slot + 1
+
+    model, scaler = load()
+    model.eval()
+
+    cached = _load_seed_result(seed) if resume else None
+    if cached is not None:
+        aware_df, lagged_df, horizon_df = cached
+        ts = _ts_for_seed(seed)
+    else:
+        ts = _ts_for_seed(seed)
+        aware_df, lagged_df, horizon_df = _run_backtest(
+            ts, model, scaler, seed=seed, resume=resume, ckpt_every=ckpt_every,
+            carbon_price_eur_per_t=carbon_price, tqdm_position=pos,
+        )
+        _save_seed_result(aware_df, lagged_df, horizon_df, seed)
+        _clear_seed_partial(seed)
+
+    strat_dfs = {"aware": aware_df, "lagged": lagged_df, "horizon": horizon_df}
+    true_costs: dict[str, pd.Series] = {}
+    for s, df in strat_dfs.items():
+        done_path = _seed_true_cost_done_path(seed, s)
+        if done_path.exists() and resume:
+            cached_tc = pd.read_parquet(done_path)
+            if "time" in cached_tc.columns:
+                cached_tc["time"] = pd.to_datetime(cached_tc["time"], utc=True)
+                cached_tc = cached_tc.set_index("time")
+            true_costs[s] = cached_tc["true_cost_eur"]
+        else:
+            true_costs[s] = _eval_true_cost_for_seed_strategy(
+                df, ts, seed, s, carbon_price, resume=resume,
+                n_workers=inner_workers, tqdm_position=pos,
+            )
+            done_path.parent.mkdir(parents=True, exist_ok=True)
+            done_df = true_costs[s].reset_index()
+            tmp = done_path.with_suffix(".parquet.tmp")
+            done_df.to_parquet(tmp, index=False)
+            tmp.replace(done_path)
+            partial = _seed_true_cost_partial_path(seed, s)
+            if partial.exists():
+                partial.unlink()
+
+    yearly_aware   = true_costs["aware"].resample("YE").sum()
+    yearly_lagged  = true_costs["lagged"].resample("YE").sum()
+    yearly_horizon = true_costs["horizon"].resample("YE").sum()
+
+    records = []
+    for ts_end in yearly_aware.index:
+        records.append({
+            "seed": seed,
+            "year": int(ts_end.year),
+            "aware_eur":          float(yearly_aware[ts_end]),
+            "blind_lagged_eur":   float(yearly_lagged[ts_end]),
+            "blind_horizon_eur":  float(yearly_horizon[ts_end]),
+            "saving_vs_lagged_pct": float(
+                (yearly_lagged[ts_end] - yearly_aware[ts_end]) / yearly_lagged[ts_end] * 100
+            ),
+            "saving_vs_horizon_pct": float(
+                (yearly_horizon[ts_end] - yearly_aware[ts_end]) / yearly_horizon[ts_end] * 100
+            ),
+        })
+    return records
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -380,6 +474,14 @@ def main() -> None:
         help="v1.3 B1 CO2 price in EUR per tonne. Cached seed results are invalidated "
              "whenever this changes value across runs.",
     )
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help=(
+            "Parallel processes across seeds. Default 1 (serial). Inner CoolProp "
+            "pool auto-scales to floor(cpu_count / workers) per outer worker so "
+            "total CPU usage stays sane."
+        ),
+    )
     args = parser.parse_args()
     resume = not args.no_resume
 
@@ -387,84 +489,133 @@ def main() -> None:
         git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
     except Exception:
         git_sha = "unknown"
-    print(f"git_sha={git_sha}  seeds={SEEDS}  carbon_price={args.carbon_price:.1f} EUR/tCO2")
 
-    model, scaler = load()
-    model.eval()
+    total_cores = max(1, os.cpu_count() or 1)
+    n_workers = max(1, min(args.workers, len(SEEDS)))
+    inner_workers = max(1, total_cores // n_workers)
+    print(
+        f"git_sha={git_sha}  seeds={SEEDS}  carbon_price={args.carbon_price:.1f} EUR/tCO2  "
+        f"workers={n_workers} (inner CoolProp pool ≈ {inner_workers} per worker)"
+    )
 
     all_records: list[dict] = []
 
-    for seed in tqdm(SEEDS, desc="Seeds"):
-        # ----- Phase 1: dispatch backtest ---------------------------------------
-        cached = _load_seed_result(seed) if resume else None
-        if cached is not None:
-            aware_df, lagged_df, horizon_df = cached
-            print(f"  seed={seed}: reusing cached backtest result")
-            ts = _ts_for_seed(seed)
-        else:
-            ts = _ts_for_seed(seed)
-            aware_df, lagged_df, horizon_df = _run_backtest(
-                ts, model, scaler, seed=seed, resume=resume, ckpt_every=args.ckpt_every,
-                carbon_price_eur_per_t=args.carbon_price,
-            )
-            _save_seed_result(aware_df, lagged_df, horizon_df, seed)
-            _clear_seed_partial(seed)
-
-        # ----- Phase 2: CoolProp true-cost re-eval (per-strategy cached) --------
-        # Mirrors scripts/07_carbon_sweep.py: each (seed, strategy) keeps a
-        # consolidated "done" parquet plus an in-progress per-row partial.
-        strat_dfs = {"aware": aware_df, "lagged": lagged_df, "horizon": horizon_df}
-        true_costs: dict[str, pd.Series] = {}
-        for s, df in strat_dfs.items():
-            done_path = _seed_true_cost_done_path(seed, s)
-            if done_path.exists() and resume:
-                cached_tc = pd.read_parquet(done_path)
-                if "time" in cached_tc.columns:
-                    cached_tc["time"] = pd.to_datetime(cached_tc["time"], utc=True)
-                    cached_tc = cached_tc.set_index("time")
-                true_costs[s] = cached_tc["true_cost_eur"]
-            else:
-                true_costs[s] = _eval_true_cost_for_seed_strategy(
-                    df, ts, seed, s, args.carbon_price, resume=resume,
+    if n_workers > 1:
+        # Parallel-seed path: each worker is self-contained (loads its own
+        # model + timeseries). Outer tqdm tracks completed seeds; inner
+        # per-worker progress lines live at positions slot+1.
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(
+                    _process_one_seed,
+                    int(seed), args.no_resume, args.ckpt_every, args.carbon_price,
+                    inner_workers, i % n_workers,
+                ): int(seed)
+                for i, seed in enumerate(SEEDS)
+            }
+            for future in tqdm(
+                as_completed(futures), total=len(futures),
+                desc="Seeds (parallel)", unit="seed", position=0,
+            ):
+                seed = futures[future]
+                try:
+                    records = future.result()
+                except Exception as exc:
+                    tqdm.write(f"  seed={seed}: FAILED with {exc!r}")
+                    raise
+                all_records.extend(records)
+                # Per-seed total saving printout (matches the serial path format).
+                lagged_total = sum(r["blind_lagged_eur"] for r in records)
+                horizon_total = sum(r["blind_horizon_eur"] for r in records)
+                aware_total = sum(r["aware_eur"] for r in records)
+                total_lagged_pct  = (lagged_total - aware_total)  / lagged_total  * 100
+                total_horizon_pct = (horizon_total - aware_total) / horizon_total * 100
+                tqdm.write(
+                    f"  seed={seed}  lagged={total_lagged_pct:.2f}%  "
+                    f"horizon={total_horizon_pct:.2f}%"
                 )
-                done_path.parent.mkdir(parents=True, exist_ok=True)
-                done_df = true_costs[s].reset_index()
-                tmp = done_path.with_suffix(".parquet.tmp")
-                done_df.to_parquet(tmp, index=False)
-                tmp.replace(done_path)
-                partial = _seed_true_cost_partial_path(seed, s)
-                if partial.exists():
-                    partial.unlink()
+    else:
+        # Serial path — preserves the in-line per-seed prints and resume messages.
+        model, scaler = load()
+        model.eval()
 
-        # Yearly aggregation uses CoolProp truth, not PINN predictions.
-        yearly_aware   = true_costs["aware"].resample("YE").sum()
-        yearly_lagged  = true_costs["lagged"].resample("YE").sum()
-        yearly_horizon = true_costs["horizon"].resample("YE").sum()
+        for seed in tqdm(SEEDS, desc="Seeds"):
+            # ----- Phase 1: dispatch backtest -----------------------------------
+            cached = _load_seed_result(seed) if resume else None
+            if cached is not None:
+                aware_df, lagged_df, horizon_df = cached
+                print(f"  seed={seed}: reusing cached backtest result")
+                ts = _ts_for_seed(seed)
+            else:
+                ts = _ts_for_seed(seed)
+                aware_df, lagged_df, horizon_df = _run_backtest(
+                    ts, model, scaler, seed=seed, resume=resume,
+                    ckpt_every=args.ckpt_every,
+                    carbon_price_eur_per_t=args.carbon_price,
+                )
+                _save_seed_result(aware_df, lagged_df, horizon_df, seed)
+                _clear_seed_partial(seed)
 
-        for ts_end in yearly_aware.index:
-            all_records.append({
-                "seed": seed,
-                "year": ts_end.year,
-                "aware_eur":          float(yearly_aware[ts_end]),
-                "blind_lagged_eur":   float(yearly_lagged[ts_end]),
-                "blind_horizon_eur":  float(yearly_horizon[ts_end]),
-                "saving_vs_lagged_pct": float(
-                    (yearly_lagged[ts_end] - yearly_aware[ts_end]) / yearly_lagged[ts_end] * 100
-                ),
-                "saving_vs_horizon_pct": float(
-                    (yearly_horizon[ts_end] - yearly_aware[ts_end]) / yearly_horizon[ts_end] * 100
-                ),
-            })
+            # ----- Phase 2: CoolProp true-cost re-eval (per-strategy cached) ----
+            # Mirrors scripts/07_carbon_sweep.py: each (seed, strategy) keeps a
+            # consolidated "done" parquet plus an in-progress per-row partial.
+            strat_dfs = {"aware": aware_df, "lagged": lagged_df, "horizon": horizon_df}
+            true_costs: dict[str, pd.Series] = {}
+            for s, df in strat_dfs.items():
+                done_path = _seed_true_cost_done_path(seed, s)
+                if done_path.exists() and resume:
+                    cached_tc = pd.read_parquet(done_path)
+                    if "time" in cached_tc.columns:
+                        cached_tc["time"] = pd.to_datetime(cached_tc["time"], utc=True)
+                        cached_tc = cached_tc.set_index("time")
+                    true_costs[s] = cached_tc["true_cost_eur"]
+                else:
+                    true_costs[s] = _eval_true_cost_for_seed_strategy(
+                        df, ts, seed, s, args.carbon_price, resume=resume,
+                    )
+                    done_path.parent.mkdir(parents=True, exist_ok=True)
+                    done_df = true_costs[s].reset_index()
+                    tmp = done_path.with_suffix(".parquet.tmp")
+                    done_df.to_parquet(tmp, index=False)
+                    tmp.replace(done_path)
+                    partial = _seed_true_cost_partial_path(seed, s)
+                    if partial.exists():
+                        partial.unlink()
 
-        total_lagged_pct = (
-            (lagged_df["cost_eur"].sum() - aware_df["cost_eur"].sum())
-            / lagged_df["cost_eur"].sum() * 100
-        )
-        total_horizon_pct = (
-            (horizon_df["cost_eur"].sum() - aware_df["cost_eur"].sum())
-            / horizon_df["cost_eur"].sum() * 100
-        )
-        print(f"  seed={seed}  lagged={total_lagged_pct:.2f}%  horizon={total_horizon_pct:.2f}%")
+            # Yearly aggregation uses CoolProp truth, not PINN predictions.
+            yearly_aware   = true_costs["aware"].resample("YE").sum()
+            yearly_lagged  = true_costs["lagged"].resample("YE").sum()
+            yearly_horizon = true_costs["horizon"].resample("YE").sum()
+
+            for ts_end in yearly_aware.index:
+                all_records.append({
+                    "seed": seed,
+                    "year": ts_end.year,
+                    "aware_eur":          float(yearly_aware[ts_end]),
+                    "blind_lagged_eur":   float(yearly_lagged[ts_end]),
+                    "blind_horizon_eur":  float(yearly_horizon[ts_end]),
+                    "saving_vs_lagged_pct": float(
+                        (yearly_lagged[ts_end] - yearly_aware[ts_end])
+                        / yearly_lagged[ts_end] * 100
+                    ),
+                    "saving_vs_horizon_pct": float(
+                        (yearly_horizon[ts_end] - yearly_aware[ts_end])
+                        / yearly_horizon[ts_end] * 100
+                    ),
+                })
+
+            total_lagged_pct = (
+                (lagged_df["cost_eur"].sum() - aware_df["cost_eur"].sum())
+                / lagged_df["cost_eur"].sum() * 100
+            )
+            total_horizon_pct = (
+                (horizon_df["cost_eur"].sum() - aware_df["cost_eur"].sum())
+                / horizon_df["cost_eur"].sum() * 100
+            )
+            print(
+                f"  seed={seed}  lagged={total_lagged_pct:.2f}%  "
+                f"horizon={total_horizon_pct:.2f}%"
+            )
 
     results_df = pd.DataFrame(all_records)
 

@@ -15,34 +15,106 @@ sns.set_theme(style="whitegrid", palette="muted")
 
 
 def fig_carbon_sweep(sweep_df: pd.DataFrame) -> None:
-    """v1.3 headline figure: aware-vs-horizon true-cost saving vs CO2 price.
+    """v1.3 headline figure: aware-vs-lagged saving + temporal-arbitrage collapse.
 
-    ``sweep_df`` has columns: price_co2_eur_per_t, year, saving_vs_horizon_pct.
-    One line per year + a mean line. Annotates the €80/tCO2 EU-ETS point.
+    Two panels share an x-axis (carbon price):
+
+    Panel A — composition-awareness value: aware vs lagged-blind baseline.
+              The lagged baseline is the realistic operator assumption ("I know
+              last cargo's composition but not today's blend"). Per-year lines
+              are drawn faintly; the cross-year mean is bold. If a fresh
+              ``seed_sensitivity_summary.csv`` exists in results/tables/, a
+              ±2σ seed-noise band is overlaid as a horizontal shaded region,
+              giving the reader the threshold above which the saving is
+              statistically meaningful.
+
+    Panel B — temporal-arbitrage value: aware vs constant-flow baseline. This
+              collapses from ~16% at zero carbon to <1% at any positive
+              carbon price, because emissions are pinned by the demand
+              constraint and dominate the cost — the surprising finding that
+              motivates the composition story.
+
+    ``sweep_df`` must have columns: price_co2_eur_per_t, year,
+    aware, horizon, lagged, annual, constant, saving_vs_lagged_pct.
     """
-    years = sorted(sweep_df["year"].unique())
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    for year in years:
-        sub = sweep_df[sweep_df["year"] == year].sort_values("price_co2_eur_per_t")
-        ax.plot(
-            sub["price_co2_eur_per_t"], sub["saving_vs_horizon_pct"],
-            marker="o", linewidth=1.4, label=str(year), alpha=0.65,
-        )
-    mean = sweep_df.groupby("price_co2_eur_per_t")["saving_vs_horizon_pct"].mean()
-    ax.plot(
-        mean.index, mean.values,
-        color="black", linewidth=2.3, marker="s", label="mean", zorder=10,
+    sweep = sweep_df.copy()
+    sweep["saving_vs_constant_pct"] = (
+        (sweep["constant"] - sweep["aware"]) / sweep["constant"] * 100
     )
-    if 80.0 in mean.index:
-        ax.axvline(80.0, color="firebrick", linestyle="--", alpha=0.5)
-        ax.text(82, ax.get_ylim()[1] * 0.92, "EU ETS\n(~€80/tCO₂)",
-                color="firebrick", fontsize=9, va="top")
-    ax.axhline(0.0, color="grey", linewidth=0.8)
-    ax.set_xlabel("Carbon price (EUR/tCO₂)")
-    ax.set_ylabel("Aware vs horizon-blind saving (%)")
-    ax.set_title("Composition-aware dispatch saving vs carbon price")
-    ax.legend(loc="best", fontsize=9, ncol=2)
-    fig.tight_layout()
+
+    years = sorted(sweep["year"].unique())
+    palette = sns.color_palette("muted", n_colors=len(years))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 4.6), sharex=True)
+
+    # ---- Panel A: aware vs lagged ------------------------------------------
+    for year, color in zip(years, palette):
+        sub = sweep[sweep["year"] == year].sort_values("price_co2_eur_per_t")
+        ax1.plot(
+            sub["price_co2_eur_per_t"], sub["saving_vs_lagged_pct"],
+            marker="o", linewidth=1.0, alpha=0.45, color=color, label=str(year),
+        )
+    mean_lagged = sweep.groupby("price_co2_eur_per_t")["saving_vs_lagged_pct"].mean()
+    ax1.plot(
+        mean_lagged.index, mean_lagged.values,
+        color="black", linewidth=2.4, marker="s", label="3-yr mean", zorder=10,
+    )
+
+    # Optional ±2σ seed-noise band — only drawn if a fresh seed-sensitivity
+    # summary is on disk. We use the cross-year mean of the per-year std as a
+    # single typical noise scale; the carbon-sweep is at one composition seed,
+    # so this is the implicit uncertainty on every blue/orange/green dot.
+    seed_path = Path("results/tables/seed_sensitivity_summary.csv")
+    if seed_path.exists():
+        try:
+            seed = pd.read_csv(seed_path)
+            lagged_rows = seed[seed["baseline"] == "lagged"]
+            if not lagged_rows.empty and "std" in lagged_rows.columns:
+                typical_std = float(lagged_rows["std"].mean())
+                ax1.axhspan(
+                    -2 * typical_std, 2 * typical_std,
+                    color="grey", alpha=0.12, zorder=0,
+                    label=f"±2σ seed noise (~±{2*typical_std:.1f}%)",
+                )
+        except Exception:
+            pass
+
+    if 80.0 in mean_lagged.index:
+        ax1.axvline(80.0, color="firebrick", linestyle="--", alpha=0.6, linewidth=1.0)
+    ax1.axhline(0.0, color="grey", linewidth=0.8)
+    ax1.set_xlabel("Carbon price (EUR / tCO$_2$)")
+    ax1.set_ylabel("Saving vs lagged-composition baseline (%)")
+    ax1.set_title("A. Composition-awareness value\n(aware vs lagged-blind)")
+    ax1.legend(loc="best", fontsize=8, ncol=2)
+
+    # ---- Panel B: aware vs constant (the surprising collapse) --------------
+    for year, color in zip(years, palette):
+        sub = sweep[sweep["year"] == year].sort_values("price_co2_eur_per_t")
+        ax2.plot(
+            sub["price_co2_eur_per_t"], sub["saving_vs_constant_pct"],
+            marker="o", linewidth=1.0, alpha=0.45, color=color, label=str(year),
+        )
+    mean_const = sweep.groupby("price_co2_eur_per_t")["saving_vs_constant_pct"].mean()
+    ax2.plot(
+        mean_const.index, mean_const.values,
+        color="black", linewidth=2.4, marker="s", label="3-yr mean", zorder=10,
+    )
+    if 80.0 in mean_const.index:
+        ax2.axvline(80.0, color="firebrick", linestyle="--", alpha=0.6, linewidth=1.0)
+    ax2.axhline(0.0, color="grey", linewidth=0.8)
+    ax2.set_xlabel("Carbon price (EUR / tCO$_2$)")
+    ax2.set_ylabel("Saving vs constant-flow baseline (%)")
+    ax2.set_title("B. Temporal-arbitrage value\n(aware vs constant-flow)")
+    ax2.legend(loc="best", fontsize=8, ncol=2)
+
+    # Shared EU-ETS annotation in figure coordinates so both panels reference
+    # the same x position without overlapping panel content.
+    fig.text(
+        0.5, 0.965, r"Vertical dashed line: current EU ETS (~€80/tCO$_2$)",
+        ha="center", va="top", fontsize=9, color="firebrick",
+    )
+
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(FIG_DIR / "fig6_carbon_sweep.pdf")
     plt.close(fig)
 
