@@ -19,6 +19,7 @@ this script runs them serially — the inner dispatch is already parallelised.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -51,12 +52,82 @@ INV_INITIAL = 0.85
 STRATEGIES = ("aware", "horizon", "lagged", "annual", "constant")
 
 
+def _dispatch_partial_records_path(price: float) -> Path:
+    """All-strategies-tagged record cache for an in-progress Phase-1 dispatch."""
+    return PROCESSED_DIR / f"carbon_dispatch_partial_co2{int(price)}.parquet"
+
+
+def _dispatch_partial_state_path(price: float) -> Path:
+    """Inventories + next_start for the in-progress Phase-1 dispatch."""
+    return PROCESSED_DIR / f"carbon_dispatch_partial_co2{int(price)}.json"
+
+
+def _save_dispatch_partial(
+    records_by_strategy: dict[str, list[dict]],
+    inv: dict[str, float],
+    next_start: int,
+    price: float,
+) -> None:
+    """Atomic flush of Phase-1 dispatch state for one carbon price."""
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    rec_path = _dispatch_partial_records_path(price)
+    frames = []
+    for strategy, records in records_by_strategy.items():
+        if not records:
+            continue
+        df = pd.DataFrame(records)
+        df["_strategy"] = strategy
+        frames.append(df)
+    if frames:
+        combined = pd.concat(frames, ignore_index=True)
+        tmp = rec_path.with_suffix(".parquet.tmp")
+        combined.to_parquet(tmp, index=False)
+        tmp.replace(rec_path)
+    state_path = _dispatch_partial_state_path(price)
+    state = {"next_start": next_start, "inv": inv}
+    tmp_state = state_path.with_suffix(".json.tmp")
+    tmp_state.write_text(json.dumps(state))
+    tmp_state.replace(state_path)
+
+
+def _load_dispatch_partial(
+    price: float,
+) -> tuple[dict[str, list[dict]], dict[str, float], int] | None:
+    state_path = _dispatch_partial_state_path(price)
+    if not state_path.exists():
+        return None
+    try:
+        state = json.loads(state_path.read_text())
+        next_start = int(state["next_start"])
+        inv = {k: float(v) for k, v in state["inv"].items()}
+        records: dict[str, list[dict]] = {s: [] for s in STRATEGIES}
+        rec_path = _dispatch_partial_records_path(price)
+        if rec_path.exists():
+            combined = pd.read_parquet(rec_path)
+            for strategy, group in combined.groupby("_strategy", sort=False):
+                records[str(strategy)] = group.drop(columns=["_strategy"]).to_dict(
+                    orient="records"
+                )
+        return records, inv, next_start
+    except Exception as exc:
+        print(f"  co2={price:.0f}: could not load dispatch partial ({exc}); restarting")
+        return None
+
+
+def _clear_dispatch_partial(price: float) -> None:
+    for path in (_dispatch_partial_state_path(price), _dispatch_partial_records_path(price)):
+        if path.exists():
+            path.unlink()
+
+
 def _run_dispatch_for_price(
     ts: pd.DataFrame,
     model: object,
     scaler: object,
     carbon_price: float,
     tqdm_position: int = 1,
+    resume: bool = True,
+    ckpt_every: int = 20,
 ) -> dict[str, pd.DataFrame]:
     """Run all 5 strategies on the full timeseries at one carbon price.
 
@@ -64,6 +135,13 @@ def _run_dispatch_for_price(
     indexed by time]. The returned cost_eur is the PINN's prediction
     (electricity + carbon term); true-cost evaluation happens in a
     second pass via CoolProp.
+
+    Per-window partial is flushed every ``ckpt_every`` windows to
+    ``carbon_dispatch_partial_co2<price>.{parquet,json}``. On resume the
+    partial is loaded, inventories are restored, and only the missing
+    windows are processed. Cargo deliveries fire deterministically from
+    ``start % cargo_cycle_hours == 0``, so resume is safe regardless of
+    where the previous run stopped.
 
     ``tqdm_position`` controls the terminal row the per-window bar occupies —
     siblings in parallel-price mode pass distinct positions so their bars
@@ -80,9 +158,24 @@ def _run_dispatch_for_price(
 
     records: dict[str, list[dict]] = {s: [] for s in STRATEGIES}
     inv = {s: INV_INITIAL for s in STRATEGIES}
+    resume_start = 0
+
+    if resume:
+        loaded = _load_dispatch_partial(carbon_price)
+        if loaded is not None:
+            records, inv, resume_start = loaded
+            n_recs = next(iter(records.values()), [])
+            tqdm.write(
+                f"  co2={carbon_price:.0f}: resuming Phase 1 with {len(n_recs)} hours "
+                f"per strategy cached; next start={resume_start}"
+            )
+
+    pending_starts = [s for s in starts if s >= resume_start]
+    flush_counter = 0
+    last_completed = resume_start
 
     pbar = tqdm(
-        starts, desc=f"  dispatch co2={carbon_price:.0f}", unit="day",
+        pending_starts, desc=f"  dispatch co2={carbon_price:.0f}", unit="day",
         position=tqdm_position, leave=False,
     )
     for start in pbar:
@@ -127,7 +220,23 @@ def _run_dispatch_for_price(
                 })
             inv[s] = float(sched.tank_level[n_record])
 
-    return {s: pd.DataFrame(records[s]).set_index("time") for s in STRATEGIES}
+        last_completed = start + step
+        flush_counter += 1
+        if flush_counter >= ckpt_every:
+            _save_dispatch_partial(records, inv, last_completed, carbon_price)
+            flush_counter = 0
+
+    if pending_starts:
+        _save_dispatch_partial(records, inv, last_completed, carbon_price)
+
+    out: dict[str, pd.DataFrame] = {}
+    for s in STRATEGIES:
+        df = pd.DataFrame(records[s])
+        if "time" in df.columns:
+            df["time"] = pd.to_datetime(df["time"], utc=True)
+            df = df.set_index("time")
+        out[s] = df
+    return out
 
 
 def _per_strategy_done_path(price: float, strategy: str) -> Path:
@@ -270,6 +379,7 @@ def _process_one_price(
     no_resume: bool,
     inner_workers: int,
     slot: int = 0,
+    ckpt_every: int = 20,
 ) -> pd.DataFrame:
     """Self-contained worker: dispatch + true-cost re-eval for one carbon price.
 
@@ -277,7 +387,8 @@ def _process_one_price(
     have to pickle them across the process boundary. ``slot`` is the worker's
     assigned tqdm row (position = slot + 1; the parent's "Prices" bar owns
     position 0), letting every concurrent worker keep its own stable progress
-    line instead of overwriting siblings.
+    line instead of overwriting siblings. ``ckpt_every`` controls how often
+    Phase-1 dispatch flushes its per-window partial.
     """
     cache_path = RESULTS_DIR / f"carbon_sweep_co2_{int(price)}.csv"
     if cache_path.exists() and not no_resume:
@@ -292,7 +403,10 @@ def _process_one_price(
     ts.index = pd.to_datetime(ts.index, utc=True)
 
     pos = slot + 1
-    scheds = _run_dispatch_for_price(ts, model, scaler, price, tqdm_position=pos)
+    scheds = _run_dispatch_for_price(
+        ts, model, scaler, price, tqdm_position=pos,
+        resume=not no_resume, ckpt_every=ckpt_every,
+    )
 
     true_costs: dict[str, pd.Series] = {}
     for s in STRATEGIES:
@@ -326,12 +440,13 @@ def _process_one_price(
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     yearly.to_csv(cache_path, index=False)
 
-    # Final yearly CSV is the consolidated cache; per-strategy parquets are now
-    # redundant for this price.
+    # Final yearly CSV is the consolidated cache; per-strategy parquets and
+    # the Phase-1 dispatch partial are now redundant for this price.
     for s in STRATEGIES:
         for path in (_per_strategy_done_path(price, s), _per_strategy_partial_path(price, s)):
             if path.exists():
                 path.unlink()
+    _clear_dispatch_partial(price)
 
     return yearly
 
@@ -368,6 +483,10 @@ def main() -> None:
             "outer worker so total CPU usage stays sane."
         ),
     )
+    parser.add_argument(
+        "--ckpt-every", type=int, default=20,
+        help="Flush Phase-1 dispatch partial state every K windows (default 20).",
+    )
     args = parser.parse_args()
 
     try:
@@ -401,7 +520,10 @@ def main() -> None:
                 yearly = pd.read_csv(cache_path)
             else:
                 tqdm.write(f"  co2={price:.0f}: phase 1/2 — running dispatch backtest...")
-                scheds = _run_dispatch_for_price(ts, model, scaler, price)
+                scheds = _run_dispatch_for_price(
+                    ts, model, scaler, price,
+                    resume=not args.no_resume, ckpt_every=args.ckpt_every,
+                )
                 tqdm.write(
                     f"  co2={price:.0f}: phase 2/2 — CoolProp re-evaluation of 5 strategies..."
                 )
@@ -440,6 +562,7 @@ def main() -> None:
                     ):
                         if path.exists():
                             path.unlink()
+                _clear_dispatch_partial(price)
             if "price_co2_eur_per_t" not in yearly.columns:
                 yearly["price_co2_eur_per_t"] = price
             all_rows.append(yearly)
@@ -454,7 +577,8 @@ def main() -> None:
             futures = {
                 executor.submit(
                     _process_one_price,
-                    float(price), args.no_resume, inner_workers, i % n_workers,
+                    float(price), args.no_resume, inner_workers,
+                    i % n_workers, args.ckpt_every,
                 ): float(price)
                 for i, price in enumerate(args.prices)
             }
