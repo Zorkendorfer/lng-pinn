@@ -130,6 +130,29 @@ def _run_dispatch_for_price(
     return {s: pd.DataFrame(records[s]).set_index("time") for s in STRATEGIES}
 
 
+def _per_strategy_done_path(price: float, strategy: str) -> Path:
+    """Completed per-strategy true-cost cache for one (price, strategy)."""
+    return PROCESSED_DIR / f"true_costs_co2{int(price)}_{strategy}.parquet"
+
+
+def _per_strategy_partial_path(price: float, strategy: str) -> Path:
+    """In-progress per-row true-cost cache, flushed every K completions."""
+    return PROCESSED_DIR / f"true_costs_co2{int(price)}_{strategy}_inprogress.parquet"
+
+
+def _flush_true_cost_partial(done: dict[int, float], path: Path) -> None:
+    """Atomic write of the (_row_idx, true_cost_eur) dict to a partial parquet."""
+    if not done:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(
+        {"_row_idx": list(done.keys()), "true_cost_eur": list(done.values())}
+    )
+    tmp = path.with_suffix(".parquet.tmp")
+    df.to_parquet(tmp, index=False)
+    tmp.replace(path)
+
+
 def _true_cost_row(args: tuple) -> float | None:
     """Worker: one CoolProp simulation + cost calculation, returns EUR/h.
 
@@ -160,6 +183,8 @@ def _true_cost_for_strategy(
     label: str = "",
     n_workers: int | None = None,
     tqdm_position: int = 1,
+    resume: bool = True,
+    ckpt_every: int = 2000,
 ) -> pd.Series:
     """CoolProp ground-truth cost (electricity + carbon) per hour.
 
@@ -167,6 +192,12 @@ def _true_cost_for_strategy(
     (useful for debugging and tiny inputs). ``tqdm_position`` matches the
     dispatch bar's position so siblings in parallel-price mode each keep a
     single, stable terminal row.
+
+    Resume behaviour: every ``ckpt_every`` completed rows are flushed to
+    ``true_costs_co2<price>_<label>_inprogress.parquet`` keyed by positional
+    row index. On rerun the partial is loaded and only missing rows are
+    submitted to the pool. The partial is removed once the caller persists
+    the consolidated per-strategy result.
     """
     joined = dispatch_df.join(ts_df, how="inner")
     n = len(joined)
@@ -186,23 +217,51 @@ def _true_cost_for_strategy(
         )
         for row in joined.itertuples()
     ]
-    results: list[float | None] = [None] * n
 
-    if n_workers <= 1:
-        for i, a in enumerate(tqdm(
-            arg_list, desc=desc, unit="hr", position=tqdm_position, leave=False,
-        )):
-            results[i] = _true_cost_row(a)
-    else:
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            futures = {executor.submit(_true_cost_row, a): i for i, a in enumerate(arg_list)}
-            for future in tqdm(
-                as_completed(futures), total=n,
-                desc=desc, unit="hr", position=tqdm_position, leave=False,
+    partial_path = _per_strategy_partial_path(carbon_price, label) if label else None
+    done: dict[int, float] = {}
+    if resume and partial_path is not None and partial_path.exists():
+        try:
+            prior = pd.read_parquet(partial_path)
+            for r in prior.itertuples(index=False):
+                done[int(r._row_idx)] = float(r.true_cost_eur)
+        except Exception:
+            done = {}
+
+    pending = [(i, a) for i, a in enumerate(arg_list) if i not in done]
+    if pending:
+        completed_since_ckpt = 0
+        if n_workers <= 1:
+            for i, a in tqdm(
+                pending, total=len(pending), desc=desc, unit="hr",
+                position=tqdm_position, leave=False,
             ):
-                results[futures[future]] = future.result()
+                cost = _true_cost_row(a)
+                if cost is not None:
+                    done[i] = cost
+                completed_since_ckpt += 1
+                if completed_since_ckpt >= ckpt_every and partial_path is not None:
+                    _flush_true_cost_partial(done, partial_path)
+                    completed_since_ckpt = 0
+        else:
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_true_cost_row, a): i for i, a in pending}
+                for future in tqdm(
+                    as_completed(futures), total=len(pending),
+                    desc=desc, unit="hr", position=tqdm_position, leave=False,
+                ):
+                    i = futures[future]
+                    cost = future.result()
+                    if cost is not None:
+                        done[i] = cost
+                    completed_since_ckpt += 1
+                    if completed_since_ckpt >= ckpt_every and partial_path is not None:
+                        _flush_true_cost_partial(done, partial_path)
+                        completed_since_ckpt = 0
+        if partial_path is not None:
+            _flush_true_cost_partial(done, partial_path)
 
-    out = [r if r is not None else np.nan for r in results]
+    out = [done.get(i, np.nan) for i in range(n)]
     return pd.Series(out, index=joined.index, name="true_cost_eur")
 
 
@@ -234,17 +293,46 @@ def _process_one_price(
 
     pos = slot + 1
     scheds = _run_dispatch_for_price(ts, model, scaler, price, tqdm_position=pos)
-    true_costs = {
-        s: _true_cost_for_strategy(
-            scheds[s], ts, price, label=s,
-            n_workers=inner_workers, tqdm_position=pos,
-        )
-        for s in STRATEGIES
-    }
+
+    true_costs: dict[str, pd.Series] = {}
+    for s in STRATEGIES:
+        done_path = _per_strategy_done_path(price, s)
+        if done_path.exists() and not no_resume:
+            cached = pd.read_parquet(done_path)
+            if "time" in cached.columns:
+                cached["time"] = pd.to_datetime(cached["time"], utc=True)
+                cached = cached.set_index("time")
+            true_costs[s] = cached["true_cost_eur"]
+        else:
+            true_costs[s] = _true_cost_for_strategy(
+                scheds[s], ts, price, label=s,
+                n_workers=inner_workers, tqdm_position=pos,
+                resume=not no_resume,
+            )
+            # Persist the consolidated per-strategy result so a Ctrl-C between
+            # strategies doesn't lose this one's CoolProp work.
+            done_path.parent.mkdir(parents=True, exist_ok=True)
+            done_df = true_costs[s].reset_index()
+            tmp = done_path.with_suffix(".parquet.tmp")
+            done_df.to_parquet(tmp, index=False)
+            tmp.replace(done_path)
+            # The in-progress per-row partial is now redundant.
+            partial = _per_strategy_partial_path(price, s)
+            if partial.exists():
+                partial.unlink()
+
     yearly = _yearly_savings(true_costs)
     yearly["price_co2_eur_per_t"] = price
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     yearly.to_csv(cache_path, index=False)
+
+    # Final yearly CSV is the consolidated cache; per-strategy parquets are now
+    # redundant for this price.
+    for s in STRATEGIES:
+        for path in (_per_strategy_done_path(price, s), _per_strategy_partial_path(price, s)):
+            if path.exists():
+                path.unlink()
+
     return yearly
 
 
@@ -317,15 +405,41 @@ def main() -> None:
                 tqdm.write(
                     f"  co2={price:.0f}: phase 2/2 — CoolProp re-evaluation of 5 strategies..."
                 )
-                true_costs = {
-                    s: _true_cost_for_strategy(scheds[s], ts, price, label=s)
-                    for s in STRATEGIES
-                }
+                true_costs: dict[str, pd.Series] = {}
+                for s in STRATEGIES:
+                    done_path = _per_strategy_done_path(price, s)
+                    if done_path.exists() and not args.no_resume:
+                        cached = pd.read_parquet(done_path)
+                        if "time" in cached.columns:
+                            cached["time"] = pd.to_datetime(cached["time"], utc=True)
+                            cached = cached.set_index("time")
+                        true_costs[s] = cached["true_cost_eur"]
+                        tqdm.write(f"    {s}: loaded cached per-strategy result")
+                    else:
+                        true_costs[s] = _true_cost_for_strategy(
+                            scheds[s], ts, price, label=s,
+                            resume=not args.no_resume,
+                        )
+                        done_path.parent.mkdir(parents=True, exist_ok=True)
+                        done_df = true_costs[s].reset_index()
+                        tmp = done_path.with_suffix(".parquet.tmp")
+                        done_df.to_parquet(tmp, index=False)
+                        tmp.replace(done_path)
+                        partial = _per_strategy_partial_path(price, s)
+                        if partial.exists():
+                            partial.unlink()
                 yearly = _yearly_savings(true_costs)
                 yearly["price_co2_eur_per_t"] = price
                 tqdm.write(f"  co2={price:.0f}: done. Saving {cache_path.name}")
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 yearly.to_csv(cache_path, index=False)
+                for s in STRATEGIES:
+                    for path in (
+                        _per_strategy_done_path(price, s),
+                        _per_strategy_partial_path(price, s),
+                    ):
+                        if path.exists():
+                            path.unlink()
             if "price_co2_eur_per_t" not in yearly.columns:
                 yearly["price_co2_eur_per_t"] = price
             all_rows.append(yearly)
