@@ -25,7 +25,7 @@ from lng_pinn.pinn import load
 
 PROCESSED_DIR = Path("data/processed")
 RESULTS_DIR = Path("results/tables")
-SEEDS = [42, 0, 1, 7, 13]
+SEEDS = [42, 0, 1, 7, 13, 19, 23, 31, 37, 53]
 HORIZON_DAYS = 7
 CARGO_CYCLE_HOURS = CARGO_CYCLE_DAYS * 24
 CARGO_AMOUNT = 0.55
