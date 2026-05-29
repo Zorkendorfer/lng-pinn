@@ -18,10 +18,17 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from lng_pinn.baseline import COMP_COLS, optimize_blind_horizon, optimize_blind_lagged
+# Only torch-free modules are imported at module top. The parallel CoolProp
+# workers re-import this module on spawn (Windows); pulling in torch here would
+# make every one of them load the CUDA DLLs (cufft etc.), exhausting the
+# paging file when many workers run at once. torch-dependent imports
+# (baseline/dispatch/pinn) are therefore done lazily inside the functions that
+# actually run dispatch — see _run_backtest / _process_one_seed / main.
 from lng_pinn.composition import CARGO_CYCLE_DAYS, build_composition_series
-from lng_pinn.dispatch import M_DOT_MAX, optimize
-from lng_pinn.pinn import load
+
+# Defined locally (instead of imported from baseline) to keep this module's
+# top-level import graph torch-free for the CoolProp workers.
+COMP_COLS = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2"]
 
 PROCESSED_DIR = Path("data/processed")
 RESULTS_DIR = Path("results/tables")
@@ -237,6 +244,10 @@ def _run_backtest(
     carbon_price_eur_per_t: float = 0.0,
     tqdm_position: int = 0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    # Lazy torch-pulling imports — see the module-top comment.
+    from lng_pinn.baseline import optimize_blind_horizon, optimize_blind_lagged
+    from lng_pinn.dispatch import M_DOT_MAX, optimize
+
     H = HORIZON_DAYS * 24
     step = 24
     starts = list(range(0, len(ts) - H + 1, step))
@@ -394,6 +405,7 @@ def _process_one_seed(
     resume = not no_resume
     pos = slot + 1
 
+    from lng_pinn.pinn import load  # lazy torch import — see module-top comment
     model, scaler = load()
     model.eval()
 
@@ -536,6 +548,7 @@ def main() -> None:
                 )
     else:
         # Serial path — preserves the in-line per-seed prints and resume messages.
+        from lng_pinn.pinn import load  # lazy torch import — see module-top comment
         model, scaler = load()
         model.eval()
 

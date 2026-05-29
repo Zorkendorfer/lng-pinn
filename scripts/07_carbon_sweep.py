@@ -32,15 +32,12 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from lng_pinn.baseline import (
-    optimize_blind_annual,
-    optimize_blind_horizon,
-    optimize_blind_lagged,
-    optimize_constant_flow,
-)
+# Only torch-free modules at module top: the parallel CoolProp workers re-import
+# this module on spawn (Windows), and pulling in torch here would make every
+# worker load the CUDA DLLs and exhaust the paging file. torch-dependent
+# imports (baseline/dispatch/pinn) are done lazily in the dispatch functions.
+# `plots` is torch-free (matplotlib/seaborn only) so it can stay at top.
 from lng_pinn.composition import CARGO_CYCLE_DAYS
-from lng_pinn.dispatch import M_DOT_MAX, optimize
-from lng_pinn.pinn import load
 from lng_pinn.plots import fig_carbon_sweep
 
 PROCESSED_DIR = Path("data/processed")
@@ -147,6 +144,15 @@ def _run_dispatch_for_price(
     siblings in parallel-price mode pass distinct positions so their bars
     stack instead of overwriting each other.
     """
+    # Lazy torch-pulling imports — see the module-top comment.
+    from lng_pinn.baseline import (
+        optimize_blind_annual,
+        optimize_blind_horizon,
+        optimize_blind_lagged,
+        optimize_constant_flow,
+    )
+    from lng_pinn.dispatch import M_DOT_MAX, optimize
+
     H = HORIZON_DAYS * 24
     step = 24
     cargo_cycle_hours = CARGO_CYCLE_DAYS * 24
@@ -397,6 +403,7 @@ def _process_one_price(
             yearly["price_co2_eur_per_t"] = price
         return yearly
 
+    from lng_pinn.pinn import load  # lazy torch import — see module-top comment
     model, scaler = load()
     model.eval()
     ts = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
@@ -506,6 +513,7 @@ def main() -> None:
 
     if n_workers == 1:
         # Serial path — keep the rich per-phase logging.
+        from lng_pinn.pinn import load  # lazy torch import — see module-top comment
         model, scaler = load()
         model.eval()
         ts = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")

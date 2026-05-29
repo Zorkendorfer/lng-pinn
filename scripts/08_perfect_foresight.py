@@ -36,14 +36,12 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from lng_pinn.baseline import (
-    COMP_COLS,
-    optimize_blind_lagged,
-    optimize_perfect_foresight_block,
-)
+# torch-free imports only at module top so the parallel CoolProp workers don't
+# load the CUDA DLLs on spawn (see 06/07 for the same pattern). Dispatch/model
+# imports are lazy, inside the functions that need them.
 from lng_pinn.composition import CARGO_CYCLE_DAYS
-from lng_pinn.dispatch import M_DOT_MAX, optimize
-from lng_pinn.pinn import load
+
+COMP_COLS = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2"]
 
 PROCESSED_DIR = Path("data/processed")
 RESULTS_DIR = Path("results/tables")
@@ -77,6 +75,9 @@ def _rolling_strategy(
 
     Returns a DataFrame indexed by time with columns m_dot, cost_eur (PINN).
     """
+    from lng_pinn.baseline import optimize_blind_lagged  # lazy torch import
+    from lng_pinn.dispatch import M_DOT_MAX, optimize
+
     H = HORIZON_DAYS * 24
     step = 24
     starts = list(range(0, len(ts) - H + 1, step))
@@ -116,6 +117,9 @@ def _oracle_strategy(
     Cargo is injected between blocks (like the rolling drivers inject between
     windows); blocks are full-foresight optimize() solves.
     """
+    from lng_pinn.baseline import optimize_perfect_foresight_block  # lazy torch import
+    from lng_pinn.dispatch import M_DOT_MAX
+
     demand_per_hour = M_DOT_MAX * demand_factor
     inv = INV_INITIAL
     records = []
@@ -196,6 +200,7 @@ def main() -> None:
             f"({HORIZON_DAYS}); the oracle may not dominate aware. Increase it."
         )
 
+    from lng_pinn.pinn import load  # lazy torch import — see module-top comment
     model, scaler = load()
     model.eval()
     ts = pd.read_parquet(args.timeseries)
