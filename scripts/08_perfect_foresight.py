@@ -120,7 +120,9 @@ def _oracle_strategy(
     from lng_pinn.baseline import optimize_perfect_foresight_block  # lazy torch import
     from lng_pinn.dispatch import M_DOT_MAX
 
-    demand_per_hour = M_DOT_MAX * demand_factor
+    # demand per hour in KG (kg/s * 3600), so block demand = this * n_hours
+    # matches the rolling strategies' M_DOT_MAX*demand_factor*H*3600 basis.
+    demand_per_hour = M_DOT_MAX * demand_factor * 3600.0
     inv = INV_INITIAL
     records = []
     starts = list(range(0, len(ts), block_hours))
