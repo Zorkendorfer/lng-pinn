@@ -132,7 +132,36 @@ def main() -> None:
         "--carbon-price", type=float, default=0.0,
         help="v1.3 B1 CO2 price in EUR per tonne. 0 reproduces v1.2 results bit-exactly.",
     )
+    parser.add_argument(
+        "--demand-factor", type=float, default=0.6,
+        help=(
+            "v1.4 F — send-out demand as a fraction of M_DOT_MAX (default 0.6). "
+            "Lower leaves more flow-shaping headroom; sweep to map the regime "
+            "where composition awareness pays."
+        ),
+    )
+    parser.add_argument(
+        "--timeseries", default=str(PROCESSED_DIR / "timeseries.parquet"),
+        help="v1.4 B — path to the timeseries parquet (use timeseries_<zone>.parquet "
+             "for a second price zone).",
+    )
+    parser.add_argument(
+        "--out-suffix", default="",
+        help="v1.4 B — suffix inserted into every output/partial filename, e.g. "
+             "'_DE', so a second-zone run does not clobber the LT results.",
+    )
     args = parser.parse_args()
+
+    # v1.4 B — namespace outputs/partials so zone runs are isolated. 04 is fully
+    # serial, so reassigning these module globals in main() is safe.
+    global PARTIAL_RECORDS, PARTIAL_STATE, FINAL_OUTPUTS
+    suf = args.out_suffix
+    if suf:
+        PARTIAL_RECORDS = PROCESSED_DIR / f"dispatch_partial{suf}.parquet"
+        PARTIAL_STATE = PROCESSED_DIR / f"dispatch_partial_state{suf}.json"
+        FINAL_OUTPUTS = {
+            k: v.replace("_v1.parquet", f"_v1{suf}.parquet") for k, v in FINAL_OUTPUTS.items()
+        }
 
     try:
         git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
@@ -146,7 +175,7 @@ def main() -> None:
     model, scaler = load()
     model.eval()
 
-    ts = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
+    ts = pd.read_parquet(args.timeseries)
     ts.index = pd.to_datetime(ts.index, utc=True)
 
     H = args.horizon_days * 24
@@ -155,7 +184,7 @@ def main() -> None:
     annual_composition = ts[COMP_COLS].mean()
     starts = list(range(0, len(ts) - H + 1, step))
     n_windows = len(starts)
-    demand_kg = M_DOT_MAX * 0.6 * H * 3600  # fixed; cargo schedule keeps tanks healthy
+    demand_kg = M_DOT_MAX * args.demand_factor * H * 3600  # cargo schedule keeps tanks healthy
 
     # --- Initialise state, then try to resume -----------------------------------
     records_by_strategy: dict[str, list[dict[str, object]]] = {s: [] for s in STRATEGIES}

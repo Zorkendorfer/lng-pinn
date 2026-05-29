@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 
@@ -100,6 +101,52 @@ def _seed_noise_per_year(baseline: str = "lagged") -> dict[int, float] | None:
     return None
 
 
+def _seed_mean_se_per_year(
+    baseline: str = "lagged",
+) -> tuple[dict[int, float], dict[int, float]] | None:
+    """Return ({year: mean}, {year: standard error}) of aware-vs-<baseline>%.
+
+    SE = std / sqrt(n_seeds) is the spread of the *mean estimator* — the
+    quantity the paper's confidence interval is built on, distinct from the
+    single-seed prediction spread (std) used for the wider error bar.
+    """
+    seed_files = sorted(Path("data/processed").glob("seed_sensitivity_seed*.parquet"))
+    seed_files = [p for p in seed_files if "partial" not in p.name]
+    if not seed_files:
+        return None
+    try:
+        rows = []
+        for path in seed_files:
+            try:
+                seed_id = int(path.stem.replace("seed_sensitivity_seed", ""))
+            except ValueError:
+                continue
+            df = pd.read_parquet(path)
+            if "_strategy" not in df.columns or "time" not in df.columns:
+                continue
+            df["time"] = pd.to_datetime(df["time"], utc=True)
+            df["year"] = df["time"].dt.year
+            pivot = df.groupby(["year", "_strategy"])["cost_eur"].sum().unstack()
+            if not ({"aware", baseline} <= set(pivot.columns)):
+                continue
+            for year, row in pivot.iterrows():
+                rows.append({
+                    "seed": seed_id,
+                    "year": int(year),
+                    "saving_pct": (row[baseline] - row["aware"]) / row[baseline] * 100.0,
+                })
+        if rows:
+            g = pd.DataFrame(rows).groupby("year")["saving_pct"]
+            means = {int(y): float(v) for y, v in g.mean().items()}
+            counts = g.count()
+            stds = g.std()
+            ses = {int(y): float(stds[y] / (counts[y] ** 0.5)) for y in counts.index}
+            return means, ses
+    except Exception:
+        pass
+    return None
+
+
 def _seed_noise_std(baseline: str = "lagged") -> float | None:
     """Estimate the cross-year mean of the per-year std of aware-vs-<baseline>%.
 
@@ -188,72 +235,80 @@ def fig_carbon_sweep(sweep_df: pd.DataFrame) -> None:
     )
 
     years = sorted(sweep["year"].unique())
-    palette = sns.color_palette("muted", n_colors=len(years))
+    # Quiet per-year context lines; one warm accent for the bold mean.
+    year_palette = sns.color_palette("Blues", n_colors=len(years) + 1)[1:]
+    mean_color = "#b2182b"  # warm red, stands out against the blue year lines
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 4.6), sharex=True)
 
-    # ---- Panel A: aware vs lagged ------------------------------------------
-    # Each year as its own line; at €80 we overlay a star marker showing the
-    # 10-seed mean (the actual best estimate for that year), with a vertical
-    # ±2σ error bar around it. The carbon-sweep dot at €80 is one draw from
-    # this seed distribution and may sit anywhere within the band.
-    seed_stats = _seed_stats_per_year("lagged")
-    per_year_mean: dict[int, float] = seed_stats[0] if seed_stats else {}
-    per_year_std: dict[int, float] = seed_stats[1] if seed_stats else {}
-    for year, color in zip(years, palette):
-        sub = sweep[sweep["year"] == year].sort_values("price_co2_eur_per_t")
-        ax1.plot(
-            sub["price_co2_eur_per_t"], sub["saving_vs_lagged_pct"],
-            marker="o", linewidth=1.0, alpha=0.55, color=color, label=str(year),
-        )
-        if year in per_year_std:
-            ax1.errorbar(
-                80.0, per_year_mean[year], yerr=2 * per_year_std[year],
-                fmt="*", color=color, markersize=12, markeredgecolor="black",
-                markeredgewidth=0.8, ecolor=color, elinewidth=1.6,
-                capsize=4, capthick=1.6, alpha=0.95, zorder=9,
+    def _draw_year_context(ax: plt.Axes, ycol: str) -> None:
+        """Thin, quiet single-seed per-year lines — context, not the message."""
+        for year, color in zip(years, year_palette):
+            sub = sweep[sweep["year"] == year].sort_values("price_co2_eur_per_t")
+            ax.plot(
+                sub["price_co2_eur_per_t"], sub[ycol],
+                linewidth=1.0, alpha=0.5, color=color, zorder=3,
+                label=f"{year} (single seed)",
             )
 
+    # ---- Panel A: aware vs lagged ------------------------------------------
+    # The message is the bold cross-year mean line; the only uncertainty shown
+    # is ONE 95%-CI whisker on the seed-mean at €80 (the paper's claim). Per-year
+    # spreads and the wider single-seed prediction interval live in the per-year
+    # companion figures, keeping this panel uncluttered.
+    _draw_year_context(ax1, "saving_vs_lagged_pct")
     mean_lagged = sweep.groupby("price_co2_eur_per_t")["saving_vs_lagged_pct"].mean()
     ax1.plot(
         mean_lagged.index, mean_lagged.values,
-        color="black", linewidth=2.4, marker="s", label="3-yr mean", zorder=10,
+        color=mean_color, linewidth=2.6, marker="s", markersize=5,
+        label="3-yr mean (single seed)", zorder=10,
     )
 
+    meanse = _seed_mean_se_per_year("lagged")
+    if meanse is not None:
+        # Pool the per-year seed means/SEs into the headline cross-year CI.
+        ymeans = list(meanse[0].values())
+        yses = list(meanse[1].values())
+        if ymeans:
+            pooled_mean = float(np.mean(ymeans))
+            # SE of the average of independent per-year means.
+            pooled_se = float(np.sqrt(np.mean(np.square(yses))) / np.sqrt(len(yses)))
+            ax1.errorbar(
+                80.0, pooled_mean, yerr=2 * pooled_se,
+                fmt="o", color="black", markersize=7, ecolor="black",
+                elinewidth=2.2, capsize=5, capthick=2.0, zorder=12,
+                label="10-seed mean ±2·SE (95% CI)",
+            )
+            ax1.annotate(
+                f"{pooled_mean:+.1f}% ± {2*pooled_se:.1f}",
+                xy=(80.0, pooled_mean), xytext=(8, 10),
+                textcoords="offset points", fontsize=9, color="black",
+                fontweight="bold",
+            )
+
     if 80.0 in mean_lagged.index:
-        ax1.axvline(80.0, color="firebrick", linestyle="--", alpha=0.6, linewidth=1.0)
+        ax1.axvline(80.0, color="grey", linestyle="--", alpha=0.7, linewidth=1.0)
     ax1.axhline(0.0, color="grey", linewidth=0.8)
     ax1.set_xlabel("Carbon price (EUR / tCO$_2$)")
-    ax1.set_ylabel("Saving vs lagged-composition baseline (%)")
-    ax1.set_title("A. Composition-awareness value\n(aware vs lagged-blind)")
-    if per_year_std:
-        # Proxy artist to explain the ★ marker convention in the legend.
-        ax1.plot(
-            [], [], marker="*", markersize=10, markeredgecolor="black",
-            markeredgewidth=0.8, color="grey", linestyle="none",
-            label=r"10-seed mean ± 2σ at €80",
-        )
-    ax1.legend(loc="best", fontsize=8, ncol=2)
+    ax1.set_ylabel("Saving vs lagged baseline (%)")
+    ax1.set_title("A. Composition-awareness value")
+    ax1.legend(loc="upper left", fontsize=8, framealpha=0.9)
 
     # ---- Panel B: aware vs constant (the surprising collapse) --------------
-    for year, color in zip(years, palette):
-        sub = sweep[sweep["year"] == year].sort_values("price_co2_eur_per_t")
-        ax2.plot(
-            sub["price_co2_eur_per_t"], sub["saving_vs_constant_pct"],
-            marker="o", linewidth=1.0, alpha=0.45, color=color, label=str(year),
-        )
+    _draw_year_context(ax2, "saving_vs_constant_pct")
     mean_const = sweep.groupby("price_co2_eur_per_t")["saving_vs_constant_pct"].mean()
     ax2.plot(
         mean_const.index, mean_const.values,
-        color="black", linewidth=2.4, marker="s", label="3-yr mean", zorder=10,
+        color=mean_color, linewidth=2.6, marker="s", markersize=5,
+        label="3-yr mean", zorder=10,
     )
     if 80.0 in mean_const.index:
-        ax2.axvline(80.0, color="firebrick", linestyle="--", alpha=0.6, linewidth=1.0)
+        ax2.axvline(80.0, color="grey", linestyle="--", alpha=0.7, linewidth=1.0)
     ax2.axhline(0.0, color="grey", linewidth=0.8)
     ax2.set_xlabel("Carbon price (EUR / tCO$_2$)")
     ax2.set_ylabel("Saving vs constant-flow baseline (%)")
-    ax2.set_title("B. Temporal-arbitrage value\n(aware vs constant-flow)")
-    ax2.legend(loc="best", fontsize=8, ncol=2)
+    ax2.set_title("B. Temporal-arbitrage value")
+    ax2.legend(loc="best", fontsize=8, framealpha=0.9)
 
     # Shared EU-ETS annotation in figure coordinates so both panels reference
     # the same x position without overlapping panel content.
@@ -287,51 +342,60 @@ def fig_carbon_sweep_per_year(sweep_df: pd.DataFrame) -> list[Path]:
     seed_stats = _seed_stats_per_year("lagged")
     per_year_mean = seed_stats[0] if seed_stats else {}
     per_year_std = seed_stats[1] if seed_stats else {}
+    meanse = _seed_mean_se_per_year("lagged")
+    per_year_se = meanse[1] if meanse else {}
 
     years = sorted(sweep["year"].unique())
-    palette = sns.color_palette("muted", n_colors=len(years))
-    color_for = dict(zip(years, palette))
+    line_color = "#2166ac"  # single muted blue for the single-seed sweep line
+    mean_color = "#b2182b"  # warm red for the 10-seed mean marker
 
     written: list[Path] = []
     for year in years:
-        color = color_for[year]
         sub = sweep[sweep["year"] == year].sort_values("price_co2_eur_per_t")
         if sub.empty:
             continue
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.5, 4.2), sharex=True)
 
-        # Panel A — aware vs lagged
+        # Panel A — aware vs lagged. Single-seed sweep line + the 10-seed mean
+        # at €80 with a bold ±2·SE (95% CI) whisker and a light ±2σ
+        # (single-seed prediction) whisker, so one focused year reads cleanly.
         ax1.plot(
             sub["price_co2_eur_per_t"], sub["saving_vs_lagged_pct"],
-            marker="o", linewidth=1.6, color=color, label=f"{year} (single seed)",
+            marker="o", markersize=4, linewidth=1.6, color=line_color,
+            label=f"{year} (single seed)",
         )
         if year in per_year_std:
             ax1.errorbar(
                 80.0, per_year_mean[year], yerr=2 * per_year_std[year],
-                fmt="*", color=color, markersize=14, markeredgecolor="black",
-                markeredgewidth=0.8, ecolor=color, elinewidth=1.8,
-                capsize=5, capthick=1.8, alpha=0.95, zorder=9,
+                fmt="none", ecolor=mean_color, elinewidth=1.2,
+                capsize=6, capthick=1.2, alpha=0.4, zorder=8,
+            )
+        if year in per_year_se:
+            ax1.errorbar(
+                80.0, per_year_mean[year], yerr=2 * per_year_se[year],
+                fmt="o", color=mean_color, markersize=7, ecolor=mean_color,
+                elinewidth=2.4, capsize=4, capthick=2.0, zorder=9,
                 label=(
-                    f"10-seed mean = {per_year_mean[year]:+.2f}% "
-                    f"±2σ = {2*per_year_std[year]:.2f}%"
+                    f"10-seed mean {per_year_mean[year]:+.2f}% "
+                    f"(95% CI ±{2*per_year_se[year]:.2f}, ±2σ ±{2*per_year_std[year]:.2f})"
                 ),
             )
         if 80.0 in sub["price_co2_eur_per_t"].values:
-            ax1.axvline(80.0, color="firebrick", linestyle="--", alpha=0.6, linewidth=1.0)
+            ax1.axvline(80.0, color="grey", linestyle="--", alpha=0.7, linewidth=1.0)
         ax1.axhline(0.0, color="grey", linewidth=0.8)
         ax1.set_xlabel("Carbon price (EUR / tCO$_2$)")
-        ax1.set_ylabel("Saving vs lagged-composition baseline (%)")
+        ax1.set_ylabel("Saving vs lagged baseline (%)")
         ax1.set_title(f"{year} — A. Composition-awareness value")
         ax1.legend(loc="best", fontsize=8)
 
         # Panel B — aware vs constant-flow
         ax2.plot(
             sub["price_co2_eur_per_t"], sub["saving_vs_constant_pct"],
-            marker="o", linewidth=1.6, color=color, label=str(year),
+            marker="o", markersize=4, linewidth=1.6, color=line_color, label=str(year),
         )
         if 80.0 in sub["price_co2_eur_per_t"].values:
-            ax2.axvline(80.0, color="firebrick", linestyle="--", alpha=0.6, linewidth=1.0)
+            ax2.axvline(80.0, color="grey", linestyle="--", alpha=0.7, linewidth=1.0)
         ax2.axhline(0.0, color="grey", linewidth=0.8)
         ax2.set_xlabel("Carbon price (EUR / tCO$_2$)")
         ax2.set_ylabel("Saving vs constant-flow baseline (%)")
@@ -349,6 +413,83 @@ def fig_carbon_sweep_per_year(sweep_df: pd.DataFrame) -> list[Path]:
         written.append(out_path)
 
     return written
+
+
+def fig_foresight_gap(cascade_df: pd.DataFrame) -> None:
+    """v1.4 A — savings cascade: constant -> lagged -> aware -> oracle.
+
+    ``cascade_df`` has one row per strategy with columns:
+        strategy (constant|lagged|aware|oracle), saving_vs_lagged_pct,
+        and optionally year. If a ``year`` column is present the bars are
+        grouped by year; otherwise a single pooled set of bars is drawn.
+
+    The figure frames the headline as "aware captures X% of the
+    perfect-foresight ceiling" by placing aware between the realistic lagged
+    baseline (0% reference) and the oracle ceiling.
+    """
+    order = ["lagged", "aware", "oracle"]
+    labels = {
+        "lagged": "lagged\n(realistic baseline)",
+        "aware": "aware\n(7-day foresight)",
+        "oracle": "oracle\n(perfect foresight)",
+    }
+    df = cascade_df[cascade_df["strategy"].isin(order)].copy()
+    df["strategy"] = pd.Categorical(df["strategy"], categories=order, ordered=True)
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    if "year" in df.columns and df["year"].nunique() > 1:
+        years = sorted(df["year"].unique())
+        palette = sns.color_palette("muted", n_colors=len(years))
+        width = 0.8 / len(years)
+        x = range(len(order))
+        for i, (year, color) in enumerate(zip(years, palette)):
+            sub = df[df["year"] == year].set_index("strategy").reindex(order)
+            offs = [xi + (i - (len(years) - 1) / 2) * width for xi in x]
+            ax.bar(offs, sub["saving_vs_lagged_pct"].values, width=width,
+                   color=color, label=str(year))
+        ax.set_xticks(list(x))
+    else:
+        pooled = df.groupby("strategy", observed=True)["saving_vs_lagged_pct"].mean().reindex(order)
+        ax.bar(range(len(order)), pooled.values, color=sns.color_palette("muted")[:len(order)])
+        ax.set_xticks(range(len(order)))
+    ax.set_xticklabels([labels[s] for s in order])
+    ax.axhline(0.0, color="grey", linewidth=0.8)
+    ax.set_ylabel("Cost saving vs lagged baseline (%)")
+    ax.set_title("Perfect-foresight cascade (true cost, €80/tCO$_2$)")
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(loc="best", fontsize=8, title="year")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "fig7_foresight_gap.pdf")
+    plt.close(fig)
+
+
+def fig_volatility_vs_saving(diag_df: pd.DataFrame) -> None:
+    """v1.4 D — per-window price volatility vs realised aware-vs-lagged saving.
+
+    Explains the weak 2022 (energy-crisis) result: high-volatility windows
+    cluster at low/negative saving because the optimiser chases price
+    arbitrage, swamping the carbon-composition signal.
+
+    ``diag_df`` columns: price_volatility, saving_eur (or saving_pct), year.
+    """
+    y_col = "saving_pct" if "saving_pct" in diag_df.columns else "saving_eur"
+    years = sorted(diag_df["year"].unique())
+    palette = sns.color_palette("muted", n_colors=len(years))
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    for year, color in zip(years, palette):
+        sub = diag_df[diag_df["year"] == year]
+        ax.scatter(sub["price_volatility"], sub[y_col], alpha=0.6, color=color,
+                   label=str(year), s=22)
+    overall_corr = diag_df[["price_volatility", y_col]].corr().iloc[0, 1]
+    ax.axhline(0.0, color="grey", linewidth=0.8)
+    ax.set_xlabel("Per-window price volatility (EUR/MWh)")
+    ax.set_ylabel("Aware-vs-lagged saving "
+                  + ("(%)" if y_col == "saving_pct" else "(EUR)"))
+    ax.set_title(f"Saving vs price volatility  (r = {overall_corr:.2f})")
+    ax.legend(loc="best", fontsize=8, title="year")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "fig8_volatility_vs_saving.pdf")
+    plt.close(fig)
 
 
 def fig_cost_delta(
@@ -382,9 +523,9 @@ def fig_sensitivity(sensitivity_df: pd.DataFrame) -> None:
         ax.set_xlabel(label)
         ax.set_title(f"r = {corr:.2f}")
     axes[0].set_ylabel("Total cost saving (EUR)")
-    fig.suptitle("Dispatch saving drivers by rolling window", y=1.02)
-    fig.tight_layout()
-    fig.savefig(FIG_DIR / "fig2_sensitivity.pdf")
+    fig.suptitle("Dispatch saving drivers by rolling window")
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(FIG_DIR / "fig2_sensitivity.pdf", bbox_inches="tight")
     plt.close(fig)
 
 

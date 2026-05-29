@@ -19,7 +19,7 @@ from lng_pinn.plots import (
     fig_load_shift_heatmap,
     fig_sensitivity,
     fig_surrogate_eval,
-    fig_surrogate_fidelity,
+    fig_volatility_vs_saving,
 )
 
 RESULTS_DIR = Path("results/tables")
@@ -447,13 +447,31 @@ def main() -> None:
     fig_load_shift_heatmap(aware_df, blind_df, ts_df)
     print("fig3_load_shift.pdf written")
 
-    fidelity_df = build_fidelity_table(
+    # v1.4 D — 2022 diagnostic: per-window price volatility vs aware-vs-lagged
+    # saving, coloured by year. Explains why the crisis year's saving is weak.
+    horizon = f"{args.horizon_days}D"
+    diag_saving = (lagged_df["cost_eur"] - aware_df["cost_eur"]).resample(horizon).sum()
+    diag_vol = ts_df["price_eur_mwh"].reindex(aware_df.index).resample(horizon).std()
+    diag_df = pd.DataFrame({
+        "price_volatility": diag_vol,
+        "saving_eur": diag_saving,
+    }).dropna()
+    diag_df["year"] = diag_df.index.year
+    diag_df.to_csv(RESULTS_DIR / "volatility_vs_saving.csv", index=False)
+    fig_volatility_vs_saving(diag_df)
+    print("fig8_volatility_vs_saving.pdf written")
+
+    # v1.4: fig4 (PINN-vs-CoolProp parity scatter) is dropped from the figure
+    # set — the physics-by-construction PINN matches CoolProp to ~1e-7 relative
+    # cost error, so the scatter is an uninformative y=x line and fig5's
+    # MAE/RMSE/R² bars already document accuracy. We still build fidelity.csv
+    # as a numeric backup (it is the quantitative form of the same claim).
+    build_fidelity_table(
         aware_df, ts_df, args.fidelity_samples,
         resume=resume,
         carbon_price_eur_per_t=args.carbon_price,
     )
-    fig_surrogate_fidelity(fidelity_df)
-    print("fig4_fidelity.pdf written")
+    print("fidelity.csv written (fig4 scatter retired — see fig5 for accuracy)")
 
     export_csv_tables()
 

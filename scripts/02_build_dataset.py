@@ -22,6 +22,12 @@ def main() -> None:
     parser.add_argument("--start", default="2021-01-01")
     parser.add_argument("--end", default="2024-01-01")
     parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument(
+        "--zone", default="LT",
+        help="v1.4 B — ENTSO-E price zone. Non-LT zones write "
+             "timeseries_<zone>.parquet (LT keeps the bare name). The training "
+             "set is zone-independent and is only rebuilt for LT.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="N=1000, skip timeseries build")
     args = parser.parse_args()
 
@@ -31,26 +37,29 @@ def main() -> None:
         git_sha = "unknown"
 
     N = 1_000 if args.dry_run else args.n
-    print(f"git_sha={git_sha}  N={N}  seed={args.seed}  dry_run={args.dry_run}")
+    print(f"git_sha={git_sha}  N={N}  seed={args.seed}  zone={args.zone}  dry_run={args.dry_run}")
 
-    # --- Training set ---
-    t0 = time.perf_counter()
-    df = build_training_set(N=N, seed=args.seed, workers=args.workers)
-    elapsed = time.perf_counter() - t0
-    print(f"Training set done in {elapsed:.1f}s  ({N / elapsed:.0f} samples/s)")
-    print(df.describe())
+    # --- Training set (zone-independent; only build for the default LT run) ---
+    if args.zone == "LT":
+        t0 = time.perf_counter()
+        df = build_training_set(N=N, seed=args.seed, workers=args.workers)
+        elapsed = time.perf_counter() - t0
+        print(f"Training set done in {elapsed:.1f}s  ({N / elapsed:.0f} samples/s)")
+        print(df.describe())
 
-    bad = (df["W_total"] <= 0).sum()
-    if bad:
-        print(f"WARNING: {bad} rows with non-positive W_total")
+        bad = (df["W_total"] <= 0).sum()
+        if bad:
+            print(f"WARNING: {bad} rows with non-positive W_total")
+        else:
+            print("Energy balance check passed: all W_total > 0")
     else:
-        print("Energy balance check passed: all W_total > 0")
+        print(f"zone={args.zone}: skipping training-set rebuild (it is zone-independent).")
 
     # --- Timeseries (skip in dry-run) ---
     if not args.dry_run:
-        print(f"\nBuilding timeseries {args.start} → {args.end} ...")
+        print(f"\nBuilding timeseries {args.start} → {args.end}  zone={args.zone} ...")
         t1 = time.perf_counter()
-        ts = build_timeseries(start=args.start, end=args.end)
+        ts = build_timeseries(start=args.start, end=args.end, zone=args.zone)
         print(f"Timeseries done in {time.perf_counter() - t1:.1f}s  ({len(ts)} rows)")
         print(f"NaN check: {ts.isna().sum().to_dict()}")
         print(ts.describe())

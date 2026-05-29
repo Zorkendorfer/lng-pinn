@@ -120,3 +120,38 @@ def optimize_blind(
     return optimize_blind_horizon(
         horizon_df, model, scaler, demand_kg, inv0, carbon_price_eur_per_t
     )
+
+
+def optimize_perfect_foresight_block(
+    block_df: pd.DataFrame,
+    model: PINNMLP,
+    scaler: Scaler,
+    demand_per_hour_kg: float,
+    inv0: float,
+    carbon_price_eur_per_t: float = 0.0,
+) -> Schedule:
+    """v1.4 A — perfect-foresight dispatch over one block with true composition.
+
+    The full-horizon single-shot LP is intractable (the inventory constraint is
+    O(T²)), so the oracle runs over non-overlapping blocks whose inventory is
+    carried across by the caller, with cargo injected *between* blocks exactly
+    as the rolling drivers inject it between windows. When the block length is a
+    multiple of the cargo cycle and aligned to it, there are no mid-block cargo
+    arrivals, so this is a plain ``optimize`` call over the block (the tested
+    path) — no ``cargo_frac_cumulative`` shimming required.
+
+    Within a block it sees the entire block's true hourly composition and price
+    at once — no rolling-window myopia, no composition blinding — so for blocks
+    longer than the rolling strategies' 7-day lookahead it is an
+    extended/perfect-foresight reference. In practice
+
+        saving(oracle) >= saving(aware) >= saving(lagged)
+
+    at every carbon price; validate this ordering on the first run (a violation
+    means the block is shorter than the rolling lookahead, or a dispatch bug).
+    """
+    demand_kg = demand_per_hour_kg * len(block_df)
+    return optimize(
+        block_df, model, scaler, demand_kg, inv0,
+        carbon_price_eur_per_t=carbon_price_eur_per_t,
+    )

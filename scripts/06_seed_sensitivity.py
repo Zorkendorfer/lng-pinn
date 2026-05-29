@@ -628,6 +628,13 @@ def main() -> None:
         summary_rows.append(grp)
     summary = pd.concat(summary_rows, ignore_index=True)
 
+    # v1.4 C0 — significance table. The paper's claim is about the *mean*
+    # saving across composition seeds, so report SE = std/sqrt(n), the
+    # one-sample t-stat against 0, and the two-sided p-value. Both per-year
+    # and pooled (each seed's 3-year-mean saving, n = #seeds) rows are written.
+    significance = _build_significance_table(results_df)
+    significance.to_csv(RESULTS_DIR / "seed_significance.csv", index=False)
+
     # Seed-averaged overall saving
     seed_totals = results_df.groupby("seed")["saving_vs_lagged_pct"].mean()
     overall_mean = float(seed_totals.mean())
@@ -640,7 +647,51 @@ def main() -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     results_df.to_csv(RESULTS_DIR / "seed_sensitivity.csv", index=False)
     summary.to_csv(RESULTS_DIR / "seed_sensitivity_summary.csv", index=False)
-    print("Saved seed_sensitivity.csv and seed_sensitivity_summary.csv")
+    print("Saved seed_sensitivity.csv, seed_sensitivity_summary.csv, seed_significance.csv")
+
+
+def _build_significance_table(results_df: pd.DataFrame) -> pd.DataFrame:
+    """Per-year and pooled one-sample t-tests of aware-vs-baseline saving vs 0.
+
+    The pooled row collapses each seed to its 3-year-mean saving first, so
+    n = number of seeds and the rows are independent draws over composition
+    realisations — the correct unit for the headline confidence interval.
+    """
+    from scipy import stats
+
+    rows = []
+    for baseline in ["lagged", "horizon"]:
+        col = f"saving_vs_{baseline}_pct"
+
+        for year, g in results_df.groupby("year"):
+            rows.append(_ttest_row(g[col].to_numpy(), baseline, str(int(year)), stats))
+
+        per_seed = results_df.groupby("seed")[col].mean().to_numpy()
+        rows.append(_ttest_row(per_seed, baseline, "ALL_3yr_mean", stats))
+
+    return pd.DataFrame(rows)
+
+
+def _ttest_row(x: "np.ndarray", baseline: str, scope: str, stats: object) -> dict:
+    """One-sample t-test summary dict for saving array ``x`` vs 0."""
+    n = int(len(x))
+    mean = float(np.mean(x))
+    std = float(np.std(x, ddof=1)) if n > 1 else 0.0
+    se = std / np.sqrt(n) if n > 1 else 0.0
+    t = mean / se if se > 0 else float("nan")
+    p = float(2 * stats.t.sf(abs(t), df=n - 1)) if (n > 1 and se > 0) else float("nan")  # type: ignore[attr-defined]
+    return {
+        "baseline": baseline,
+        "scope": scope,
+        "n": n,
+        "mean_pct": round(mean, 4),
+        "std_pct": round(std, 4),
+        "se_pct": round(se, 4),
+        "ci95_lo_pct": round(mean - 1.96 * se, 4),
+        "ci95_hi_pct": round(mean + 1.96 * se, 4),
+        "t_stat": round(t, 3),
+        "p_two_sided": p,
+    }
 
 
 if __name__ == "__main__":

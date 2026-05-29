@@ -295,6 +295,18 @@ def append_trajectory_rows(
     return int(len(new_df))
 
 
+def timeseries_path(zone: str = "LT") -> Path:
+    """Canonical timeseries parquet path for a price zone.
+
+    LT keeps the historical bare name ``timeseries.parquet`` for backward
+    compatibility; other zones (v1.4 B) are suffixed, e.g.
+    ``timeseries_DE.parquet``, so a second-zone run never clobbers the first.
+    """
+    if zone == "LT":
+        return PROCESSED_DIR / "timeseries.parquet"
+    return PROCESSED_DIR / f"timeseries_{zone}.parquet"
+
+
 def build_timeseries(
     start: str = "2021-01-01",
     end: str = "2024-01-01",
@@ -306,8 +318,13 @@ def build_timeseries(
     Joins ENTSO-E day-ahead prices, Open-Meteo weather, and synthetic
     cargo composition trajectories on a common UTC hourly index.
 
+    The weather and composition are tied to the physical FSRU terminal
+    (Klaipėda) and are identical across zones; only the price series changes.
+    A non-LT zone is therefore a "price counterfactual" at the same terminal —
+    the cleanest generalisation test (see lng-pinn-v1.4-plan.md, item B).
+
     Returns:
-        DataFrame saved to data/processed/timeseries.parquet with columns:
+        DataFrame saved to data/processed/timeseries[_<zone>].parquet with columns:
         price_eur_mwh, T_amb (K), T_sw (K), CH4, C2H6, C3H8, nC4H10, iC4H10, N2.
     """
     prices = load_da_prices(start, end, zone=zone)
@@ -324,5 +341,5 @@ def build_timeseries(
     ts = ts.dropna(subset=["price_eur_mwh"])  # drop any residual gaps
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    ts.to_parquet(PROCESSED_DIR / "timeseries.parquet")
+    ts.to_parquet(timeseries_path(zone))
     return ts

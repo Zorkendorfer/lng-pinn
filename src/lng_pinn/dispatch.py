@@ -100,6 +100,7 @@ def optimize(
     demand_kg: float,
     inv0: float = 0.5,
     carbon_price_eur_per_t: float = 0.0,
+    cargo_frac_cumulative: np.ndarray | None = None,
 ) -> Schedule:
     """Run dispatch optimisation over horizon_df.
 
@@ -113,6 +114,14 @@ def optimize(
         carbon_price_eur_per_t:
             v1.3 B1 carbon-cost term, in EUR per tonne CO2. With the default 0.0
             the objective is electricity-only and results are bit-identical to v1.2.
+        cargo_frac_cumulative:
+            v1.4 A — optional length-T array giving the *cumulative* cargo
+            delivered (as a fraction of TANK_CAP) by the end of each hour.
+            Used by the perfect-foresight oracle to model mid-horizon cargo
+            arrivals inside a single long-horizon optimisation. With the
+            default None there are no mid-horizon arrivals and behaviour is
+            bit-identical to v1.3 (the rolling drivers inject cargo between
+            windows instead).
     """
     T = len(horizon_df)
     flow_levels = np.linspace(M_DOT_MIN, M_DOT_MAX, N_FLOW_LEVELS)
@@ -140,11 +149,20 @@ def optimize(
     ub[:T] = 1.0
     lb[T] = demand_kg
 
-    # Inventory bounds: cumulative outflow after each hour must stay in [min, max].
-    # Build a (T, T*L) lower-triangular block matrix in CSR directly.
-    # Row t: sum of flow_kg_h[l] * x[prev_t, l] for prev_t <= t, all l.
-    min_cumulative = (inv0 - TANK_MAX) * TANK_CAP
-    max_cumulative = (inv0 - TANK_MIN) * TANK_CAP
+    # Inventory bounds: tank level after each hour must stay in [TANK_MIN, TANK_MAX].
+    #   level(t) = inv0 + cargo_frac_cumulative(t) - cumOut(t)/TANK_CAP
+    # Rearranged into cumulative-outflow bounds, the cargo term shifts the
+    # per-row [min, max] window up by cargo_frac_cumulative(t)*TANK_CAP.
+    if cargo_frac_cumulative is None:
+        cargo_cum = np.zeros(T, dtype=np.float64)
+    else:
+        cargo_cum = np.asarray(cargo_frac_cumulative, dtype=np.float64)
+        if cargo_cum.shape != (T,):
+            raise ValueError(
+                f"cargo_frac_cumulative must have shape ({T},), got {cargo_cum.shape}"
+            )
+    min_cumulative = (inv0 + cargo_cum - TANK_MAX) * TANK_CAP  # (T,)
+    max_cumulative = (inv0 + cargo_cum - TANK_MIN) * TANK_CAP  # (T,)
     # Lower-triangular cumulative block: entry (t, prev_t*L+l) = flow_kg_h[l] for prev_t<=t.
     # Build via Kronecker: tril(ones(T,T)) ⊗ flow_kg_h row.
     tril_mask = np.tril(np.ones((T, T), dtype=np.float64))  # (T, T)
@@ -153,8 +171,8 @@ def optimize(
     inv_dense = np.kron(tril_mask, flow_kg_h[None, :])  # (T, T*L)
     inv_block = csr_matrix(inv_dense)
     constraint_csr = vstack([csr_matrix(eq_block), inv_block])
-    lb = np.concatenate([lb, np.full(T, min_cumulative)])
-    ub = np.concatenate([ub, np.full(T, max_cumulative)])
+    lb = np.concatenate([lb, min_cumulative])
+    ub = np.concatenate([ub, max_cumulative])
 
     result = milp(
         c=cost_table.reshape(n_vars),
@@ -170,6 +188,11 @@ def optimize(
     cost_out = (cost_table * x).sum(axis=1)
     cumulative_flow = np.concatenate(([0.0], np.cumsum(m_dot_out * 3600.0)))
     inv_out = inv0 - cumulative_flow / TANK_CAP
+    if cargo_frac_cumulative is not None:
+        # Reflect mid-horizon cargo arrivals in the reported tank level.
+        # inv_out[0] is the initial level (no cargo yet); inv_out[t+1] gets
+        # the cumulative cargo delivered by the end of hour t.
+        inv_out[1:] = inv_out[1:] + cargo_cum
 
     return Schedule(
         m_dot=m_dot_out,
