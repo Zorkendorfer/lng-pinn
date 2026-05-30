@@ -1,4 +1,11 @@
-"""ENTSO-E Lithuanian day-ahead price ingestion and weather data fetching."""
+"""ENTSO-E day-ahead price ingestion and Open-Meteo weather fetching.
+
+v1.5: weather is now site-aware. ``pull_weather`` and ``build_timeseries``
+take optional ``lat``/``lon`` (or a named site via :data:`SITES`) so the
+same code can be reused for any FSRU site. Cached weather files include
+the lat/lon in their filename so Klaipėda and Wilhelmshaven coexist
+without clobbering each other.
+"""
 
 from __future__ import annotations
 
@@ -10,11 +17,38 @@ import requests
 from entsoe import EntsoePandasClient
 
 RAW_DIR = Path("data/raw")
-ZONE = "LT"  # ENTSO-E bidding zone
+ZONE = "LT"  # ENTSO-E bidding zone (default — Lithuania)
 
-# Independence FSRU, Klaipėda
+# Independence FSRU, Klaipėda — defaults preserved for back-compat.
 LAT = 55.71
 LON = 21.13
+
+
+# Known FSRU sites: name → (lat, lon, ENTSO-E bidding zone).
+# Lat/lon are approximate terminal coordinates; ENTSO-E zone is the
+# spot-market bidding zone the terminal lives in.
+SITES: dict[str, tuple[float, float, str]] = {
+    "klaipeda":      (55.71, 21.13, "LT"),     # Independence — reference site
+    "wilhelmshaven": (53.52, 8.13,  "DE_LU"),  # Höegh Esperanza / Excelsior / Excelerate
+    "brunsbuttel":   (53.89, 9.13,  "DE_LU"),  # Höegh Gannet
+    "stade":         (53.61, 9.47,  "DE_LU"),
+    "mukran":        (54.51, 13.71, "DE_LU"),  # Energos Power (Rügen)
+    "lubmin":        (54.13, 13.62, "DE_LU"),  # Neptune (shut down 2024)
+}
+
+
+def resolve_site(site: str) -> tuple[float, float, str]:
+    """Look up a known site by name. Case-insensitive; underscores ignored.
+
+    Returns ``(lat, lon, zone)``. Raises ``KeyError`` with an enumerated
+    list of valid names if the site is unknown.
+    """
+    key = site.lower().replace("_", "").replace(" ", "")
+    aliases = {k.replace("_", "").replace(" ", ""): k for k in SITES}
+    if key not in aliases:
+        valid = ", ".join(sorted(SITES))
+        raise KeyError(f"Unknown site {site!r}. Valid: {valid}")
+    return SITES[aliases[key]]
 
 
 def _token() -> str:
@@ -92,18 +126,41 @@ def load_da_prices(start: str, end: str, zone: str = ZONE) -> pd.DataFrame:
     return df
 
 
-def pull_weather(start: str, end: str) -> pd.DataFrame:
-    """Fetch hourly T_amb and T_sw for Klaipėda from Open-Meteo and cache.
+def pull_weather(
+    start: str,
+    end: str,
+    lat: float = LAT,
+    lon: float = LON,
+) -> pd.DataFrame:
+    """Fetch hourly T_amb and T_sw at (``lat``, ``lon``) from Open-Meteo.
 
     Uses ERA5 reanalysis (archive API) for air temperature and the Marine
-    API for sea surface temperature.
+    API for sea surface temperature. The cache filename embeds the
+    coordinates so different sites coexist on disk:
+
+        data/raw/weather_<lat>_<lon>_<start>_<end>.parquet
+
+    A legacy file ``weather_<start>_<end>.parquet`` (without coordinates)
+    is recognised only when ``lat``/``lon`` equal the module defaults
+    (Klaipėda) — that keeps the v1.4 Lithuanian cache valid without a
+    re-pull.
+
+    Args:
+        start, end: ISO date strings (UTC).
+        lat, lon:   site coordinates. Default: Klaipėda.
 
     Returns:
-        DataFrame indexed by UTC hour with columns T_amb (K) and T_sw (K).
+        DataFrame indexed by UTC hour with columns T_amb (K), T_sw (K).
     """
-    cache_path = RAW_DIR / f"weather_{start}_{end}.parquet"
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = RAW_DIR / f"weather_{lat:.2f}_{lon:.2f}_{start}_{end}.parquet"
+
+    # Legacy filename support (no lat/lon in cache name) — Klaipėda only.
+    legacy_path = RAW_DIR / f"weather_{start}_{end}.parquet"
     if cache_path.exists():
         return pd.read_parquet(cache_path)
+    if legacy_path.exists() and (lat, lon) == (LAT, LON):
+        return pd.read_parquet(legacy_path)
 
     # Open-Meteo end date is inclusive; subtract one day
     end_date = (pd.Timestamp(end) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -112,8 +169,8 @@ def pull_weather(start: str, end: str) -> pd.DataFrame:
     r_air = requests.get(
         "https://archive-api.open-meteo.com/v1/archive",
         params={
-            "latitude": LAT,
-            "longitude": LON,
+            "latitude": lat,
+            "longitude": lon,
             "start_date": start,
             "end_date": end_date,
             "hourly": "temperature_2m",
@@ -133,8 +190,8 @@ def pull_weather(start: str, end: str) -> pd.DataFrame:
     r_sea = requests.get(
         "https://marine-api.open-meteo.com/v1/marine",
         params={
-            "latitude": LAT,
-            "longitude": LON,
+            "latitude": lat,
+            "longitude": lon,
             "start_date": start,
             "end_date": end_date,
             "hourly": "sea_surface_temperature",
@@ -157,6 +214,5 @@ def pull_weather(start: str, end: str) -> pd.DataFrame:
     # Forward-fill any NaNs (coastal SST has occasional gaps)
     df = df.ffill().bfill()
 
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
     df.to_parquet(cache_path)
     return df

@@ -312,23 +312,46 @@ def build_timeseries(
     end: str = "2024-01-01",
     zone: str = "LT",
     seed: int = 42,
+    site: str | None = None,
+    lat: float | None = None,
+    lon: float | None = None,
 ) -> pd.DataFrame:
     """Build hourly timeseries of (price, T_amb, T_sw, composition) for dispatch.
 
     Joins ENTSO-E day-ahead prices, Open-Meteo weather, and synthetic
     cargo composition trajectories on a common UTC hourly index.
 
-    The weather and composition are tied to the physical FSRU terminal
-    (Klaipėda) and are identical across zones; only the price series changes.
-    A non-LT zone is therefore a "price counterfactual" at the same terminal —
-    the cleanest generalisation test (see lng-pinn-v1.4-plan.md, item B).
+    v1.5: site-aware. Pass either a named ``site`` (resolves to lat/lon/zone
+    via :data:`lng_pinn.market.SITES`) or explicit ``lat`` and ``lon``. If
+    only ``site`` is given, ``zone`` is overridden to match the site's
+    bidding zone. If neither is given, falls back to the Klaipėda defaults
+    so all v1.4 call sites keep working unchanged.
 
     Returns:
         DataFrame saved to data/processed/timeseries[_<zone>].parquet with columns:
         price_eur_mwh, T_amb (K), T_sw (K), CH4, C2H6, C3H8, nC4H10, iC4H10, N2.
     """
+    from lng_pinn.market import LAT as DEFAULT_LAT
+    from lng_pinn.market import LON as DEFAULT_LON
+    from lng_pinn.market import resolve_site
+
+    if site is not None:
+        s_lat, s_lon, s_zone = resolve_site(site)
+        if lat is None:
+            lat = s_lat
+        if lon is None:
+            lon = s_lon
+        # A named site overrides the zone unless an explicit non-default
+        # zone was passed in.
+        if zone == "LT":
+            zone = s_zone
+    if lat is None:
+        lat = DEFAULT_LAT
+    if lon is None:
+        lon = DEFAULT_LON
+
     prices = load_da_prices(start, end, zone=zone)
-    weather = pull_weather(start, end)
+    weather = pull_weather(start, end, lat=lat, lon=lon)
 
     # Align weather to price index (resample/reindex to hourly UTC)
     idx = prices.index
