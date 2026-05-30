@@ -76,11 +76,8 @@ def _flush_true_cost_partial(done: dict[int, float], path: Path) -> None:
 
 
 def _true_cost_row(args: tuple) -> float | None:
-    """Worker: one CoolProp simulation + cost calculation (EUR/h).
-
-    Top-level so ProcessPoolExecutor can pickle it. Locally imports plant /
-    thermo so worker startup doesn't pay for the parent's full import graph.
-    Mirrors the equivalent helper in scripts/07_carbon_sweep.py.
+    """Legacy per-row worker. Kept for back-compat; v1.5 uses
+    ``_simulate_thermo_for_worker`` + driver-side cost arithmetic instead.
     """
     composition, m_dot, T_amb, T_sw, price, carbon_price = args
     from lng_pinn.plant import simulate
@@ -98,6 +95,67 @@ def _true_cost_row(args: tuple) -> float | None:
     return float(elec + carbon)
 
 
+# ---- v1.5 E1: dedupe-before-submit thermo memoization -------------------------
+def _simulate_thermo_for_worker(args: tuple) -> float | None:
+    """Thermo-only worker — returns W_total (kWh/kg) for the bucketed args.
+    Mirrors the helper in 07_carbon_sweep.py.
+    """
+    composition, m_dot, T_amb, T_sw = args
+    from lng_pinn.plant import simulate
+
+    try:
+        return float(simulate(composition, m_dot, T_amb, T_sw).W_total)
+    except ValueError:
+        return None
+
+
+def _thermo_key(
+    comp: tuple,
+    m_dot: float,
+    T_amb: float,
+    T_sw: float,
+    m_dot_bucket: float = 0.5,
+    T_bucket: float = 0.5,
+) -> tuple:
+    """Quantised key for thermo memoization. See lng-pinn-v1.5-plan.md §E1."""
+    return (
+        comp,
+        round(m_dot / m_dot_bucket) * m_dot_bucket,
+        round(T_amb / T_bucket) * T_bucket,
+        round(T_sw / T_bucket) * T_bucket,
+    )
+
+
+def _append_validation_diagnostics(
+    *,
+    seed: int,
+    strategy: str,
+    carbon_price: float,
+    rel_err: np.ndarray,
+    n_total: int,
+    n_sampled: int,
+) -> None:
+    """Append a one-row PINN-vs-CoolProp validation summary."""
+    if rel_err.size == 0:
+        return
+    path = RESULTS_DIR / "phase2_validation.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = pd.DataFrame([{
+        "script": "06_seed_sensitivity",
+        "carbon_price_eur_per_t": carbon_price,
+        "seed": seed,
+        "strategy": strategy,
+        "n_total": int(n_total),
+        "n_sampled": int(n_sampled),
+        "mean_rel_err": float(np.mean(rel_err)),
+        "median_abs_rel_err": float(np.median(np.abs(rel_err))),
+        "p95_abs_rel_err": float(np.quantile(np.abs(rel_err), 0.95)),
+        "max_abs_rel_err": float(np.max(np.abs(rel_err))),
+    }])
+    header = not path.exists()
+    row.to_csv(path, mode="a", index=False, header=header)
+
+
 def _eval_true_cost_for_seed_strategy(
     dispatch_df: pd.DataFrame,
     ts: pd.DataFrame,
@@ -108,27 +166,49 @@ def _eval_true_cost_for_seed_strategy(
     ckpt_every: int = 2000,
     n_workers: int | None = None,
     tqdm_position: int = 1,
+    validation_sample_frac: float = 1.0,
 ) -> pd.Series:
     """CoolProp ground-truth cost (EUR/h) per hour for one (seed, strategy).
 
-    Parallel across processes (one CoolProp call per row). Flushes a per-row
-    partial every ``ckpt_every`` completions to
-    seed_true_costs_seed<seed>_<strategy>_inprogress.parquet so a Ctrl-C only
-    loses the rows since the last flush.
+    v1.5 E1: rows are bucketed via ``_thermo_key`` so only unique buckets
+    hit the CoolProp pool. W_total is broadcast back to all rows sharing a
+    bucket; cost arithmetic happens in the driver.
+
+    v1.5 E2: when ``validation_sample_frac < 1.0``, only that fraction
+    of rows is evaluated through CoolProp; the rest use the PINN's predicted
+    cost from ``dispatch_df.cost_eur``. Per-call validation rel-err
+    diagnostics are appended to ``results/tables/phase2_validation.csv``.
     """
+    from lng_pinn.thermo import co2_per_kg_fuel
+
     joined = dispatch_df.join(ts, how="inner")
     n = len(joined)
-    arg_list = [
-        (
-            tuple(float(getattr(row, c)) for c in COMP_COLS),
-            float(row.m_dot),
-            float(row.T_amb),
-            float(row.T_sw),
-            float(row.price_eur_mwh),
-            float(carbon_price),
-        )
-        for row in joined.itertuples()
-    ]
+    if n_workers is None:
+        n_workers = max(1, os.cpu_count() or 1)
+
+    rows_factors: list[tuple] = []
+    keys: list[tuple] = []
+    for row in joined.itertuples():
+        comp = tuple(float(getattr(row, c)) for c in COMP_COLS)
+        m_dot = float(row.m_dot)
+        T_amb = float(row.T_amb)
+        T_sw = float(row.T_sw)
+        price = float(row.price_eur_mwh)
+        co2 = co2_per_kg_fuel(comp) if carbon_price > 0.0 else 0.0
+        key = _thermo_key(comp, m_dot, T_amb, T_sw)
+        keys.append(key)
+        rows_factors.append((price, m_dot, co2))
+
+    # E2: deterministic per (carbon_price, seed, strategy) sample.
+    if validation_sample_frac >= 1.0:
+        sample_mask = np.ones(n, dtype=bool)
+    else:
+        sd = (int(carbon_price * 1000) * 9973 + seed * 31 + hash(strategy) % 9973) & 0x7FFFFFFF
+        rng = np.random.default_rng(sd)
+        n_sample = max(1, int(round(n * validation_sample_frac)))
+        sample_idx = np.sort(rng.choice(n, size=n_sample, replace=False))
+        sample_mask = np.zeros(n, dtype=bool)
+        sample_mask[sample_idx] = True
 
     partial_path = _seed_true_cost_partial_path(seed, strategy)
     done: dict[int, float] = {}
@@ -140,27 +220,78 @@ def _eval_true_cost_for_seed_strategy(
         except Exception:
             done = {}
 
-    pending = [(i, a) for i, a in enumerate(arg_list) if i not in done]
-    if pending:
-        if n_workers is None:
-            n_workers = max(1, os.cpu_count() or 1)
+    pending_rows = [i for i in range(n) if i not in done and sample_mask[i]]
+
+    if validation_sample_frac < 1.0:
+        pinn_cost = joined["cost_eur"].to_numpy() if "cost_eur" in joined.columns else None
+        if pinn_cost is None:
+            raise RuntimeError(
+                "validation_sample_frac < 1.0 requires dispatch_df.cost_eur "
+                "(the PINN-predicted cost). It's missing from the joined frame."
+            )
+        for i in range(n):
+            if not sample_mask[i] and i not in done:
+                done[i] = float(pinn_cost[i])
+
+    if pending_rows:
+        key_to_rows: dict[tuple, list[int]] = {}
+        for i in pending_rows:
+            key_to_rows.setdefault(keys[i], []).append(i)
+        unique_keys = list(key_to_rows.keys())
+        worker_args = [(k[0], k[1], k[2], k[3]) for k in unique_keys]
+
         completed_since_ckpt = 0
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            futures = {executor.submit(_true_cost_row, a): i for i, a in pending}
-            for future in tqdm(
-                as_completed(futures), total=len(pending),
-                desc=f"  true-cost seed={seed} {strategy}", unit="hr",
-                position=tqdm_position, leave=False,
-            ):
-                i = futures[future]
-                cost = future.result()
-                if cost is not None:
-                    done[i] = cost
+
+        def _broadcast(key_idx: int, W: float | None) -> None:
+            nonlocal completed_since_ckpt
+            k = unique_keys[key_idx]
+            for i in key_to_rows[k]:
+                if W is None:
+                    continue
+                price, m_dot, co2 = rows_factors[i]
+                elec = price * W * m_dot * 3.6
+                carbon = carbon_price * co2 * m_dot * 3.6
+                done[i] = float(elec + carbon)
                 completed_since_ckpt += 1
                 if completed_since_ckpt >= ckpt_every:
                     _flush_true_cost_partial(done, partial_path)
                     completed_since_ckpt = 0
+
+        if n_workers <= 1:
+            for idx, a in enumerate(tqdm(
+                worker_args, total=len(worker_args),
+                desc=f"  true-cost seed={seed} {strategy}", unit="key",
+                position=tqdm_position, leave=False,
+            )):
+                _broadcast(idx, _simulate_thermo_for_worker(a))
+        else:
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                futures = {
+                    executor.submit(_simulate_thermo_for_worker, a): idx
+                    for idx, a in enumerate(worker_args)
+                }
+                for fut in tqdm(
+                    as_completed(futures), total=len(futures),
+                    desc=f"  true-cost seed={seed} {strategy}", unit="key",
+                    position=tqdm_position, leave=False,
+                ):
+                    _broadcast(futures[fut], fut.result())
         _flush_true_cost_partial(done, partial_path)
+
+    if validation_sample_frac < 1.0:
+        pinn_cost_arr = joined["cost_eur"].to_numpy()
+        sample_indices = np.where(sample_mask)[0]
+        sample_true = np.array(
+            [done.get(int(i), np.nan) for i in sample_indices], dtype=np.float64
+        )
+        sample_pinn = pinn_cost_arr[sample_indices]
+        denom = np.abs(sample_pinn) + 1e-12
+        rel_err = (sample_true - sample_pinn) / denom
+        rel_err = rel_err[np.isfinite(rel_err)]
+        _append_validation_diagnostics(
+            seed=seed, strategy=strategy, carbon_price=carbon_price,
+            rel_err=rel_err, n_total=n, n_sampled=int(sample_mask.sum()),
+        )
 
     out = [done.get(i, np.nan) for i in range(n)]
     return pd.Series(out, index=joined.index, name="true_cost_eur")
@@ -388,6 +519,7 @@ def _process_one_seed(
     carbon_price: float,
     inner_workers: int,
     slot: int = 0,
+    validation_sample_frac: float = 1.0,
 ) -> list[dict]:
     """Self-contained worker: dispatch + Phase-2 CoolProp re-eval for one seed.
 
@@ -436,6 +568,7 @@ def _process_one_seed(
             true_costs[s] = _eval_true_cost_for_seed_strategy(
                 df, ts, seed, s, carbon_price, resume=resume,
                 n_workers=inner_workers, tqdm_position=pos,
+                validation_sample_frac=validation_sample_frac,
             )
             done_path.parent.mkdir(parents=True, exist_ok=True)
             done_df = true_costs[s].reset_index()
@@ -494,6 +627,16 @@ def main() -> None:
             "total CPU usage stays sane."
         ),
     )
+    parser.add_argument(
+        "--validation-sample-frac", type=float, default=1.0,
+        help=(
+            "v1.5 E2: fraction of Phase-2 rows to evaluate through CoolProp "
+            "(default 1.0 = full ground-truth re-eval). At 0.05 the remaining "
+            "95%% of rows use the PINN's predicted cost (matches CoolProp to "
+            "~1e-7 rel err per v1.4); validation rel-err stats are logged to "
+            "results/tables/phase2_validation.csv."
+        ),
+    )
     args = parser.parse_args()
     resume = not args.no_resume
 
@@ -522,6 +665,7 @@ def main() -> None:
                     _process_one_seed,
                     int(seed), args.no_resume, args.ckpt_every, args.carbon_price,
                     inner_workers, i % n_workers,
+                    args.validation_sample_frac,
                 ): int(seed)
                 for i, seed in enumerate(SEEDS)
             }
@@ -585,6 +729,7 @@ def main() -> None:
                 else:
                     true_costs[s] = _eval_true_cost_for_seed_strategy(
                         df, ts, seed, s, args.carbon_price, resume=resume,
+                        validation_sample_frac=args.validation_sample_frac,
                     )
                     done_path.parent.mkdir(parents=True, exist_ok=True)
                     done_df = true_costs[s].reset_index()
