@@ -483,6 +483,25 @@ def _true_cost_for_strategy(
     return pd.Series(out, index=joined.index, name="true_cost_eur")
 
 
+# Canonical column order for the shared phase2_validation.csv. Both
+# 06_seed_sensitivity and 07_carbon_sweep write into this file; without a
+# single agreed schema, the per-row append+header-suppress trick mis-aligns
+# values from whichever script wrote second (and pandas' to_csv ignores
+# header order on append).
+_VALIDATION_COLS = [
+    "script",
+    "carbon_price_eur_per_t",
+    "seed",
+    "strategy",
+    "n_total",
+    "n_sampled",
+    "mean_rel_err",
+    "median_abs_rel_err",
+    "p95_abs_rel_err",
+    "max_abs_rel_err",
+]
+
+
 def _append_validation_diagnostics(
     *,
     carbon_price: float,
@@ -499,6 +518,7 @@ def _append_validation_diagnostics(
     row = pd.DataFrame([{
         "script": "07_carbon_sweep",
         "carbon_price_eur_per_t": carbon_price,
+        "seed": None,  # carbon sweep is single-seed; column kept for schema parity
         "strategy": label,
         "n_total": int(n_total),
         "n_sampled": int(n_sampled),
@@ -506,7 +526,7 @@ def _append_validation_diagnostics(
         "median_abs_rel_err": float(np.median(np.abs(rel_err))),
         "p95_abs_rel_err": float(np.quantile(np.abs(rel_err), 0.95)),
         "max_abs_rel_err": float(np.max(np.abs(rel_err))),
-    }])
+    }])[_VALIDATION_COLS]
     header = not path.exists()
     row.to_csv(path, mode="a", index=False, header=header)
 

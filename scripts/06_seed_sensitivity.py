@@ -126,6 +126,24 @@ def _thermo_key(
     )
 
 
+# Canonical column order — must match scripts/07_carbon_sweep.py's
+# _VALIDATION_COLS. Without an agreed schema the per-row CSV append from
+# whichever script writes second silently mis-aligns values into the
+# columns the other script chose.
+_VALIDATION_COLS = [
+    "script",
+    "carbon_price_eur_per_t",
+    "seed",
+    "strategy",
+    "n_total",
+    "n_sampled",
+    "mean_rel_err",
+    "median_abs_rel_err",
+    "p95_abs_rel_err",
+    "max_abs_rel_err",
+]
+
+
 def _append_validation_diagnostics(
     *,
     seed: int,
@@ -151,7 +169,7 @@ def _append_validation_diagnostics(
         "median_abs_rel_err": float(np.median(np.abs(rel_err))),
         "p95_abs_rel_err": float(np.quantile(np.abs(rel_err), 0.95)),
         "max_abs_rel_err": float(np.max(np.abs(rel_err))),
-    }])
+    }])[_VALIDATION_COLS]
     header = not path.exists()
     row.to_csv(path, mode="a", index=False, header=header)
 
