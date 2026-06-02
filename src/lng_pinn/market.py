@@ -66,7 +66,7 @@ def pull_da_prices(start: str, end: str, zone: str = ZONE) -> pd.DataFrame:
 
     Args:
         start: ISO date string, e.g. "2021-01-01".
-        end:   ISO date string, e.g. "2024-01-01".
+        end:   ISO date string, e.g. "2026-01-01".
         zone:  ENTSO-E bidding zone code.
 
     Returns:

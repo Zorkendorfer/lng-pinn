@@ -20,7 +20,7 @@ def main() -> None:
     parser.add_argument("--n", type=int, default=20_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--start", default="2021-01-01")
-    parser.add_argument("--end", default="2024-01-01")
+    parser.add_argument("--end", default="2026-01-01")
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument(
         "--zone", default="LT",

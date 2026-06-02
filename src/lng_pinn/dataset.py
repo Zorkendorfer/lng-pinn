@@ -309,7 +309,7 @@ def timeseries_path(zone: str = "LT") -> Path:
 
 def build_timeseries(
     start: str = "2021-01-01",
-    end: str = "2024-01-01",
+    end: str = "2026-01-01",
     zone: str = "LT",
     seed: int = 42,
     site: str | None = None,
