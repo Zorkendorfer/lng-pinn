@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -37,6 +38,24 @@ HORIZON_DAYS = 7
 CARGO_CYCLE_HOURS = CARGO_CYCLE_DAYS * 24
 CARGO_AMOUNT = 0.55
 STRATEGIES = ("aware", "lagged", "horizon")
+
+
+def _safe_replace(src: Path, dst: Path, attempts: int = 20, delay: float = 0.2) -> None:
+    """Atomic rename with retry — works around transient Windows file locks.
+
+    A Windows antivirus / Search-indexer scan can briefly hold a handle on a
+    freshly written file, making os.replace raise PermissionError(13). Under
+    heavy multiprocessing this surfaces sporadically and kills a worker;
+    retrying with a short backoff clears it. POSIX wins on the first attempt.
+    """
+    for i in range(attempts):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(delay)
 
 
 def _seed_result_path(seed: int) -> Path:
@@ -72,7 +91,7 @@ def _flush_true_cost_partial(done: dict[int, float], path: Path) -> None:
     )
     tmp = path.with_suffix(".parquet.tmp")
     df.to_parquet(tmp, index=False)
-    tmp.replace(path)
+    _safe_replace(tmp, path)
 
 
 def _true_cost_row(args: tuple) -> float | None:
@@ -345,12 +364,12 @@ def _save_seed_partial(
         combined = pd.concat(frames, ignore_index=True)
         tmp = rec_path.with_suffix(".parquet.tmp")
         combined.to_parquet(tmp, index=False)
-        tmp.replace(rec_path)
+        _safe_replace(tmp, rec_path)
     state = {"next_start": next_start, "inv": inv}
     state_path = _seed_partial_state_path(seed)
     tmp_state = state_path.with_suffix(".json.tmp")
     tmp_state.write_text(json.dumps(state))
-    tmp_state.replace(state_path)
+    _safe_replace(tmp_state, state_path)
 
 
 def _load_seed_partial(
@@ -501,7 +520,7 @@ def _save_seed_result(
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".parquet.tmp")
     combined.to_parquet(tmp, index=False)
-    tmp.replace(path)
+    _safe_replace(tmp, path)
 
 
 def _load_seed_result(
@@ -592,7 +611,7 @@ def _process_one_seed(
             done_df = true_costs[s].reset_index()
             tmp = done_path.with_suffix(".parquet.tmp")
             done_df.to_parquet(tmp, index=False)
-            tmp.replace(done_path)
+            _safe_replace(tmp, done_path)
             partial = _seed_true_cost_partial_path(seed, s)
             if partial.exists():
                 partial.unlink()
@@ -753,7 +772,7 @@ def main() -> None:
                     done_df = true_costs[s].reset_index()
                     tmp = done_path.with_suffix(".parquet.tmp")
                     done_df.to_parquet(tmp, index=False)
-                    tmp.replace(done_path)
+                    _safe_replace(tmp, done_path)
                     partial = _seed_true_cost_partial_path(seed, s)
                     if partial.exists():
                         partial.unlink()

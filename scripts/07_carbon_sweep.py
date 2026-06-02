@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -47,6 +48,26 @@ DEFAULT_PRICES = (0.0, 20.0, 40.0, 80.0, 120.0, 160.0)
 HORIZON_DAYS = 7
 INV_INITIAL = 0.85
 STRATEGIES = ("aware", "horizon", "lagged", "annual", "constant")
+
+
+def _safe_replace(src: Path, dst: Path, attempts: int = 20, delay: float = 0.2) -> None:
+    """Atomic rename with retry — works around transient Windows file locks.
+
+    On Windows, an antivirus / Search-indexer real-time scan can hold a brief
+    handle on a freshly written file, making os.replace raise
+    PermissionError(13, 'Access is denied'). Under heavy multiprocessing this
+    surfaces sporadically and kills a worker. Retrying with a short backoff
+    clears it; the operation is still atomic once it succeeds. On POSIX the
+    first attempt essentially always wins.
+    """
+    for i in range(attempts):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(delay)
 
 
 def _dispatch_partial_records_path(price: float) -> Path:
@@ -79,12 +100,12 @@ def _save_dispatch_partial(
         combined = pd.concat(frames, ignore_index=True)
         tmp = rec_path.with_suffix(".parquet.tmp")
         combined.to_parquet(tmp, index=False)
-        tmp.replace(rec_path)
+        _safe_replace(tmp, rec_path)
     state_path = _dispatch_partial_state_path(price)
     state = {"next_start": next_start, "inv": inv}
     tmp_state = state_path.with_suffix(".json.tmp")
     tmp_state.write_text(json.dumps(state))
-    tmp_state.replace(state_path)
+    _safe_replace(tmp_state, state_path)
 
 
 def _load_dispatch_partial(
@@ -265,7 +286,7 @@ def _flush_true_cost_partial(done: dict[int, float], path: Path) -> None:
     )
     tmp = path.with_suffix(".parquet.tmp")
     df.to_parquet(tmp, index=False)
-    tmp.replace(path)
+    _safe_replace(tmp, path)
 
 
 def _true_cost_row(args: tuple) -> float | None:
@@ -589,7 +610,7 @@ def _process_one_price(
             done_df = true_costs[s].reset_index()
             tmp = done_path.with_suffix(".parquet.tmp")
             done_df.to_parquet(tmp, index=False)
-            tmp.replace(done_path)
+            _safe_replace(tmp, done_path)
             # The in-progress per-row partial is now redundant.
             partial = _per_strategy_partial_path(price, s)
             if partial.exists():
@@ -718,7 +739,7 @@ def main() -> None:
                         done_df = true_costs[s].reset_index()
                         tmp = done_path.with_suffix(".parquet.tmp")
                         done_df.to_parquet(tmp, index=False)
-                        tmp.replace(done_path)
+                        _safe_replace(tmp, done_path)
                         partial = _per_strategy_partial_path(price, s)
                         if partial.exists():
                             partial.unlink()
