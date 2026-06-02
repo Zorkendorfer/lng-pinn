@@ -7,6 +7,7 @@ evaluate PINN cost per level per hour in preprocessing, solve MILP with SciPy/Hi
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,35 @@ class Schedule:
 
 
 COMP_COLS = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2"]
+
+# Cache of the (constant) constraint matrix per horizon length T. The equality
+# block (one level per hour + total-demand row) and the lower-triangular
+# inventory block depend only on T and the fixed flow-level grid, not on prices,
+# composition, inventory or carbon — so for a rolling backtest with a fixed
+# window length they are identical across all ~5k calls. Building them
+# (a dense T+1 x T*L block + an np.kron T x T*L block + CSR conversion) on every
+# call was pure waste; we build once per T and reuse. Only the bounds vary.
+_CONSTRAINT_CACHE: dict[int, Any] = {}
+
+
+def _constraint_matrix(T: int) -> Any:
+    """Return the cached sparse constraint matrix for horizon length ``T``."""
+    cached = _CONSTRAINT_CACHE.get(T)
+    if cached is not None:
+        return cached
+    n_vars = T * N_FLOW_LEVELS
+    flow_levels = np.linspace(M_DOT_MIN, M_DOT_MAX, N_FLOW_LEVELS)
+    flow_kg_h = flow_levels * 3600.0
+    eq_block = np.zeros((T + 1, n_vars), dtype=np.float64)
+    for t in range(T):
+        eq_block[t, t * N_FLOW_LEVELS : (t + 1) * N_FLOW_LEVELS] = 1.0
+    for t in range(T):
+        eq_block[T, t * N_FLOW_LEVELS : (t + 1) * N_FLOW_LEVELS] = flow_kg_h
+    tril_mask = np.tril(np.ones((T, T), dtype=np.float64))
+    inv_dense = np.kron(tril_mask, flow_kg_h[None, :])  # (T, T*L)
+    constraint_csr = vstack([csr_matrix(eq_block), csr_matrix(inv_dense)])
+    _CONSTRAINT_CACHE[T] = constraint_csr
+    return constraint_csr
 
 
 def _pinn_cost_table(
@@ -134,15 +164,11 @@ def optimize(
         raise ValueError("PINN produced non-finite dispatch costs")
 
     n_vars = T * N_FLOW_LEVELS
-    flow_kg_h = flow_levels * 3600.0
 
-    # --- one-level-per-hour + demand (T+1 rows) ---
-    # Build as dense then convert; T+1 rows is tiny.
-    eq_block = np.zeros((T + 1, n_vars), dtype=np.float64)
-    for t in range(T):
-        eq_block[t, t * N_FLOW_LEVELS : (t + 1) * N_FLOW_LEVELS] = 1.0
-    for t in range(T):
-        eq_block[T, t * N_FLOW_LEVELS : (t + 1) * N_FLOW_LEVELS] = flow_kg_h
+    # Constant structure (one-hot-per-hour rows, total-demand row, lower-triangular
+    # inventory block) is cached per T; only the bounds below vary per call.
+    constraint_csr = _constraint_matrix(T)
+
     lb = np.full(T + 1, -np.inf)
     ub = np.full(T + 1, np.inf)
     lb[:T] = 1.0
@@ -163,14 +189,6 @@ def optimize(
             )
     min_cumulative = (inv0 + cargo_cum - TANK_MAX) * TANK_CAP  # (T,)
     max_cumulative = (inv0 + cargo_cum - TANK_MIN) * TANK_CAP  # (T,)
-    # Lower-triangular cumulative block: entry (t, prev_t*L+l) = flow_kg_h[l] for prev_t<=t.
-    # Build via Kronecker: tril(ones(T,T)) ⊗ flow_kg_h row.
-    tril_mask = np.tril(np.ones((T, T), dtype=np.float64))  # (T, T)
-    # Each "block column" prev_t has L sub-columns with values flow_kg_h.
-    # Reshape to (T, T*L): repeat each tril column L times, scale by flow_kg_h.
-    inv_dense = np.kron(tril_mask, flow_kg_h[None, :])  # (T, T*L)
-    inv_block = csr_matrix(inv_dense)
-    constraint_csr = vstack([csr_matrix(eq_block), inv_block])
     lb = np.concatenate([lb, min_cumulative])
     ub = np.concatenate([ub, max_cumulative])
 

@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -114,6 +115,75 @@ def _clear_partial() -> None:
             path.unlink()
 
 
+def _run_one_strategy(
+    strategy: str,
+    timeseries_path: str,
+    carbon_price: float,
+    demand_factor: float,
+    horizon_days: int,
+    slot: int = 0,
+) -> list[dict]:
+    """Full rolling backtest for ONE strategy — a self-contained parallel worker.
+
+    The five strategies are independent (each carries its own inventory and
+    cargo, and never reads another's state), so running each in its own process
+    is exact and gives ~5x over the serial loop. The worker reloads the model
+    and timeseries itself so the parent doesn't pickle them across the boundary.
+    Returns the strategy's list of {time, m_dot, cost_eur} records.
+    """
+    model, scaler = load()
+    model.eval()
+    ts = pd.read_parquet(timeseries_path)
+    ts.index = pd.to_datetime(ts.index, utc=True)
+
+    H = horizon_days * 24
+    step = 24
+    starts = list(range(0, len(ts) - H + 1, step))
+    demand_kg = M_DOT_MAX * demand_factor * H * 3600
+    annual_composition = ts[COMP_COLS].mean()
+    cp = carbon_price
+
+    inv = INV_INITIAL
+    records: list[dict] = []
+    pbar = tqdm(
+        starts, total=len(starts), desc=f"  {strategy}", unit="day",
+        position=slot, leave=False,
+    )
+    for start in pbar:
+        if start > 0 and start % CARGO_CYCLE_HOURS == 0:
+            inv = min(0.92, inv + CARGO_AMOUNT)
+        window = ts.iloc[start : start + H]
+        n = min(step, len(window))
+
+        if strategy == "aware":
+            sched = optimize(window, model, scaler, demand_kg, inv, carbon_price_eur_per_t=cp)
+        elif strategy == "horizon":
+            sched = optimize_blind_horizon(
+                window, model, scaler, demand_kg, inv, carbon_price_eur_per_t=cp)
+        elif strategy == "lagged":
+            sched = optimize_blind_lagged(
+                window, model, scaler, demand_kg, ts[COMP_COLS].iloc[start], inv,
+                carbon_price_eur_per_t=cp)
+        elif strategy == "annual":
+            sched = optimize_blind_annual(
+                window, model, scaler, demand_kg, annual_composition, inv,
+                carbon_price_eur_per_t=cp)
+        elif strategy == "constant":
+            sched = optimize_constant_flow(
+                window, model, scaler, demand_kg, inv, carbon_price_eur_per_t=cp)
+        else:
+            raise ValueError(f"unknown strategy {strategy!r}")
+
+        for t, row in enumerate(window.iloc[:n].itertuples()):
+            records.append({
+                "time": row.Index,
+                "m_dot": float(sched.m_dot[t]),
+                "cost_eur": float(sched.cost_eur[t]),
+            })
+        inv = float(sched.tank_level[n])
+    return records
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--horizon-days", type=int, default=7)
@@ -150,6 +220,13 @@ def main() -> None:
         help="v1.4 B — suffix inserted into every output/partial filename, e.g. "
              "'_DE', so a second-zone run does not clobber the LT results.",
     )
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Run the 5 (independent) strategies in parallel processes. Default 1 "
+             "(serial, with fine-grained per-window resume). >1 gives ~5x but uses "
+             "coarse per-strategy resume (a strategy is recomputed unless its final "
+             "parquet already exists).",
+    )
     args = parser.parse_args()
 
     # v1.4 B — namespace outputs/partials so zone runs are isolated. 04 is fully
@@ -172,108 +249,130 @@ def main() -> None:
         f"carbon_price={args.carbon_price:.1f} EUR/tCO2"
     )
 
-    model, scaler = load()
-    model.eval()
-
-    ts = pd.read_parquet(args.timeseries)
-    ts.index = pd.to_datetime(ts.index, utc=True)
-
-    H = args.horizon_days * 24
-    step = 24
-
-    annual_composition = ts[COMP_COLS].mean()
-    starts = list(range(0, len(ts) - H + 1, step))
-    n_windows = len(starts)
-    demand_kg = M_DOT_MAX * args.demand_factor * H * 3600  # cargo schedule keeps tanks healthy
-
-    # --- Initialise state, then try to resume -----------------------------------
     records_by_strategy: dict[str, list[dict[str, object]]] = {s: [] for s in STRATEGIES}
-    inv: dict[str, float] = {s: INV_INITIAL for s in STRATEGIES}
-    resume_start_value = 0
 
-    if not args.no_resume:
-        loaded = _load_partial()
-        if loaded is not None:
-            records_by_strategy, inv, resume_start_value = loaded
-            n_recs = next(iter(records_by_strategy.values()), [])
-            print(
-                f"  Resumed: {len(n_recs)} hours per strategy already cached; "
-                f"next window start={resume_start_value}"
+    if args.workers and args.workers > 1:
+        # --- Parallel path: one process per (independent) strategy --------------
+        print(f"  Parallel mode: {min(args.workers, len(STRATEGIES))} strategy workers")
+        pending = list(STRATEGIES)
+        if not args.no_resume:
+            for s in list(pending):
+                fp = RESULTS_DIR / FINAL_OUTPUTS[s]
+                if fp.exists():
+                    df = pd.read_parquet(fp)
+                    df["time"] = pd.to_datetime(df["time"], utc=True)
+                    records_by_strategy[s] = df.to_dict(orient="records")
+                    pending.remove(s)
+                    print(f"    {s}: reusing cached {FINAL_OUTPUTS[s]}")
+        if pending:
+            with ProcessPoolExecutor(max_workers=min(args.workers, len(pending))) as ex:
+                futs = {
+                    ex.submit(
+                        _run_one_strategy, s, args.timeseries, args.carbon_price,
+                        args.demand_factor, args.horizon_days, i,
+                    ): s
+                    for i, s in enumerate(pending)
+                }
+                for fut in as_completed(futs):
+                    s = futs[fut]
+                    records_by_strategy[s] = fut.result()
+                    tqdm.write(f"    {s}: done ({len(records_by_strategy[s])} hours)")
+    else:
+        # --- Serial path: shared per-window solve with fine-grained resume ------
+        model, scaler = load()
+        model.eval()
+        ts = pd.read_parquet(args.timeseries)
+        ts.index = pd.to_datetime(ts.index, utc=True)
+
+        H = args.horizon_days * 24
+        step = 24
+        annual_composition = ts[COMP_COLS].mean()
+        starts = list(range(0, len(ts) - H + 1, step))
+        demand_kg = M_DOT_MAX * args.demand_factor * H * 3600
+
+        inv: dict[str, float] = {s: INV_INITIAL for s in STRATEGIES}
+        resume_start_value = 0
+        if not args.no_resume:
+            loaded = _load_partial()
+            if loaded is not None:
+                records_by_strategy, inv, resume_start_value = loaded
+                n_recs = next(iter(records_by_strategy.values()), [])
+                print(
+                    f"  Resumed: {len(n_recs)} hours per strategy already cached; "
+                    f"next window start={resume_start_value}"
+                )
+
+        pending_starts = [s for s in starts if s >= resume_start_value]
+        if not pending_starts:
+            print("  All dispatch windows already complete; writing finals.")
+
+        flush_counter = 0
+        last_completed = resume_start_value
+        pbar = tqdm(pending_starts, total=len(pending_starts), desc="Dispatch windows", unit="day")
+        for start in pbar:
+            if start > 0 and start % CARGO_CYCLE_HOURS == 0:
+                for s in STRATEGIES:
+                    inv[s] = min(0.92, inv[s] + CARGO_AMOUNT)
+
+            window = ts.iloc[start : start + H]
+            lagged_composition = ts[COMP_COLS].iloc[start]
+            record_hours = min(step, len(window))
+
+            cp = args.carbon_price
+            aware_sched    = optimize(
+                window, model, scaler, demand_kg, inv["aware"], carbon_price_eur_per_t=cp,
+            )
+            horizon_sched  = optimize_blind_horizon(
+                window, model, scaler, demand_kg, inv["horizon"], carbon_price_eur_per_t=cp,
+            )
+            lagged_sched   = optimize_blind_lagged(
+                window, model, scaler, demand_kg, lagged_composition, inv["lagged"],
+                carbon_price_eur_per_t=cp,
+            )
+            annual_sched   = optimize_blind_annual(
+                window, model, scaler, demand_kg, annual_composition, inv["annual"],
+                carbon_price_eur_per_t=cp,
+            )
+            constant_sched = optimize_constant_flow(
+                window, model, scaler, demand_kg, inv["constant"],
+                carbon_price_eur_per_t=cp,
             )
 
-    pending_starts = [s for s in starts if s >= resume_start_value]
-    if not pending_starts:
-        print("  All dispatch windows already complete; writing finals.")
+            _append_records(
+                records_by_strategy["aware"], window,
+                aware_sched.m_dot, aware_sched.cost_eur, record_hours,
+            )
+            _append_records(
+                records_by_strategy["horizon"], window,
+                horizon_sched.m_dot, horizon_sched.cost_eur, record_hours,
+            )
+            _append_records(
+                records_by_strategy["lagged"], window,
+                lagged_sched.m_dot, lagged_sched.cost_eur, record_hours,
+            )
+            _append_records(
+                records_by_strategy["annual"], window,
+                annual_sched.m_dot, annual_sched.cost_eur, record_hours,
+            )
+            _append_records(
+                records_by_strategy["constant"], window,
+                constant_sched.m_dot, constant_sched.cost_eur, record_hours,
+            )
 
-    flush_counter = 0
-    last_completed = resume_start_value
-    pbar = tqdm(pending_starts, total=len(pending_starts), desc="Dispatch windows", unit="day")
-    for start in pbar:
-        # Cargo delivery at cycle boundaries (deterministic from `start`, so resume-safe).
-        if start > 0 and start % CARGO_CYCLE_HOURS == 0:
-            for s in STRATEGIES:
-                inv[s] = min(0.92, inv[s] + CARGO_AMOUNT)
+            inv["aware"]    = float(aware_sched.tank_level[record_hours])
+            inv["horizon"]  = float(horizon_sched.tank_level[record_hours])
+            inv["lagged"]   = float(lagged_sched.tank_level[record_hours])
+            inv["annual"]   = float(annual_sched.tank_level[record_hours])
+            inv["constant"] = float(constant_sched.tank_level[record_hours])
 
-        window = ts.iloc[start : start + H]
-        lagged_composition = ts[COMP_COLS].iloc[start]
-        record_hours = min(step, len(window))
+            last_completed = start + step
+            flush_counter += 1
+            if flush_counter >= args.ckpt_every:
+                _save_partial(records_by_strategy, inv, last_completed)
+                flush_counter = 0
 
-        cp = args.carbon_price
-        aware_sched    = optimize(
-            window, model, scaler, demand_kg, inv["aware"], carbon_price_eur_per_t=cp,
-        )
-        horizon_sched  = optimize_blind_horizon(
-            window, model, scaler, demand_kg, inv["horizon"], carbon_price_eur_per_t=cp,
-        )
-        lagged_sched   = optimize_blind_lagged(
-            window, model, scaler, demand_kg, lagged_composition, inv["lagged"],
-            carbon_price_eur_per_t=cp,
-        )
-        annual_sched   = optimize_blind_annual(
-            window, model, scaler, demand_kg, annual_composition, inv["annual"],
-            carbon_price_eur_per_t=cp,
-        )
-        constant_sched = optimize_constant_flow(
-            window, model, scaler, demand_kg, inv["constant"],
-            carbon_price_eur_per_t=cp,
-        )
-
-        _append_records(
-            records_by_strategy["aware"], window,
-            aware_sched.m_dot, aware_sched.cost_eur, record_hours,
-        )
-        _append_records(
-            records_by_strategy["horizon"], window,
-            horizon_sched.m_dot, horizon_sched.cost_eur, record_hours,
-        )
-        _append_records(
-            records_by_strategy["lagged"], window,
-            lagged_sched.m_dot, lagged_sched.cost_eur, record_hours,
-        )
-        _append_records(
-            records_by_strategy["annual"], window,
-            annual_sched.m_dot, annual_sched.cost_eur, record_hours,
-        )
-        _append_records(
-            records_by_strategy["constant"], window,
-            constant_sched.m_dot, constant_sched.cost_eur, record_hours,
-        )
-
-        inv["aware"]    = float(aware_sched.tank_level[record_hours])
-        inv["horizon"]  = float(horizon_sched.tank_level[record_hours])
-        inv["lagged"]   = float(lagged_sched.tank_level[record_hours])
-        inv["annual"]   = float(annual_sched.tank_level[record_hours])
-        inv["constant"] = float(constant_sched.tank_level[record_hours])
-
-        last_completed = start + step
-        flush_counter += 1
-        if flush_counter >= args.ckpt_every:
+        if pending_starts:
             _save_partial(records_by_strategy, inv, last_completed)
-            flush_counter = 0
-
-    # Final partial flush so the last batch isn't lost if writes below fail.
-    if pending_starts:
-        _save_partial(records_by_strategy, inv, last_completed)
 
     # --- Write final per-strategy parquets --------------------------------------
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -301,9 +400,6 @@ def main() -> None:
     print(f"Total blind-annual:   {total_annual:>13,.0f} EUR  {_pct(total_annual, total_aware)}")
     pct_const = _pct(total_constant, total_aware)
     print(f"Total constant-flow:  {total_constant:>13,.0f} EUR  {pct_const}")
-
-    # n_windows kept for parity with earlier prints if needed downstream.
-    _ = n_windows
 
 
 if __name__ == "__main__":
