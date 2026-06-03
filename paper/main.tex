@@ -17,6 +17,7 @@
 \usepackage{siunitx}
 \usepackage{booktabs}
 \usepackage{graphicx}
+\usepackage{placeins}  % \FloatBarrier — keep figures within their section
 \usepackage{xcolor}
 \usepackage{natbib}
 \usepackage{hyperref}
@@ -591,7 +592,7 @@ soft-physics surrogate fails to deliver.
   \end{tabular}
 \end{table}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=0.7\textwidth]{fig5_surrogate_eval.pdf}
   \caption{PINN surrogate test-set fidelity by output channel. Bars
@@ -743,7 +744,7 @@ distribution ($\sigma=0.71\%$) and all ten realisations positive. Depending
 on the venue's figure budget these five panels may sit in a supplement; the
 captions are written to stand alone.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep_2021.pdf}
   \caption{\textbf{2021 composition-aware saving vs.\ carbon price}
@@ -764,7 +765,7 @@ captions are written to stand alone.
   \label{fig:6_2021}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep_2022.pdf}
   \caption{\textbf{2022 composition-aware saving vs.\ carbon price}
@@ -788,7 +789,7 @@ captions are written to stand alone.
   \label{fig:6_2022}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep_2023.pdf}
   \caption{\textbf{2023 composition-aware saving vs.\ carbon price}
@@ -809,7 +810,7 @@ captions are written to stand alone.
   \label{fig:6_2023}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep_2024.pdf}
   \caption{\textbf{2024 composition-aware saving vs.\ carbon price}
@@ -829,7 +830,7 @@ captions are written to stand alone.
   \label{fig:6_2024}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep_2025.pdf}
   \caption{\textbf{2025 composition-aware saving vs.\ carbon price}
@@ -877,7 +878,7 @@ volatility and realised saving that underlies the 2022 null
 shape is representative across seeds, but their absolute levels are seed
 42's and should be read with the caveat of \cref{sec:2024-outlier}.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=0.95\textwidth]{fig1_cost_delta.pdf}
   \caption{Monthly cost saving from composition-aware dispatch over
@@ -894,7 +895,7 @@ shape is representative across seeds, but their absolute levels are seed
   \label{fig:cost_delta}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=0.85\textwidth]{fig2_sensitivity.pdf}
   \caption{Saving sensitivity to cargo-composition variability.
@@ -908,7 +909,7 @@ shape is representative across seeds, but their absolute levels are seed
   \label{fig:sensitivity}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=0.85\textwidth]{fig3_load_shift.pdf}
   \caption{Hourly send-out flow shift between the aware and lagged
@@ -924,7 +925,7 @@ shape is representative across seeds, but their absolute levels are seed
   \label{fig:load_shift}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=0.85\textwidth]{fig8_volatility_vs_saving.pdf}
   \caption{Cross-year relationship between day-ahead price volatility
@@ -939,6 +940,8 @@ shape is representative across seeds, but their absolute levels are seed
     granularity.}
   \label{fig:volatility}
 \end{figure}
+
+\FloatBarrier  % flush all Results figures before Discussion begins
 
 % =========================================================================
 \section{Discussion}
@@ -1265,6 +1268,7 @@ the released pipeline is built to support.
 % five per-year companions.
 
 % =========================================================================
+\clearpage  % ensure no deferred float lands among the references
 \bibliographystyle{plainnat}
 \bibliography{refs}
 
