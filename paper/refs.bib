@@ -1,18 +1,16 @@
-% References for LNG-PINN paper
-% One-line annotations in comments; to be expanded during Phase 6 writeup.
+% References for LNG-PINN paper.
+% NOTE: BibTeX does not treat % as a comment *inside* an entry, so all
+% annotations are kept outside entries (here at the top) to avoid parse errors.
 
-% PINN foundations
 @article{raissi2019physics,
   author  = {Raissi, Maziar and Perdikaris, Paris and Karniadakis, George E.},
   title   = {Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations},
   journal = {Journal of Computational Physics},
   volume  = {378},
   pages   = {686--707},
-  year    = {2019},
-  % Foundational PINN paper; defines the framework used here.
+  year    = {2019}
 }
 
-% Loss balancing
 @article{wang2021understanding,
   author  = {Wang, Sifan and Teng, Yujun and Perdikaris, Paris},
   title   = {Understanding and mitigating gradient pathologies in physics-informed neural networks},
@@ -20,39 +18,31 @@
   volume  = {43},
   number  = {5},
   pages   = {A3055--A3081},
-  year    = {2021},
-  % NTK-based gradient norm balancing; basis for lambda update rule in pinn.py.
+  year    = {2021}
 }
 
-% LNG regasification thermodynamics
 @article{lim2013lng,
   author  = {Lim, Wonsub and Choi, Keunjae and Moon, Il},
   title   = {{LNG} regasification: A survey},
   journal = {Chemical Engineering and Processing: Process Intensification},
   volume  = {93},
   pages   = {1--15},
-  year    = {2015},
-  % Survey of ORV/SCV configurations; basis for equipment topology choice.
+  year    = {2015}
 }
 
-% ENTSO-E day-ahead prices
 @misc{entsoe2023,
-  author = {{ENTSO-E}},
-  title  = {Transparency Platform — Day-Ahead Prices},
-  year   = {2023},
-  url    = {https://transparency.entsoe.eu},
-  % Data source for LT day-ahead prices.
+  author       = {{ENTSO-E}},
+  title        = {Transparency Platform --- Day-Ahead Prices},
+  howpublished = {\url{https://transparency.entsoe.eu}},
+  year         = {2023}
 }
 
-% GIIGNL compositions
 @misc{giignl2023,
   author = {{GIIGNL}},
   title  = {Annual Report 2023},
-  year   = {2023},
-  % Source for archetypal LNG cargo mole-fraction vectors.
+  year   = {2023}
 }
 
-% CoolProp
 @article{bell2014pure,
   author  = {Bell, Ian H. and Wronski, Jorrit and Quoilin, Sylvain and Lemort, Vincent},
   title   = {Pure and pseudo-pure fluid thermophysical property evaluation and the open-source thermophysical property library {CoolProp}},
@@ -60,51 +50,42 @@
   volume  = {53},
   number  = {6},
   pages   = {2498--2508},
-  year    = {2014},
-  % Reference for CoolProp HEOS backend used as ground-truth simulator.
+  year    = {2014}
 }
 
-% Kendall multi-task uncertainty weighting
 @inproceedings{kendall2018multi,
   author    = {Kendall, Alex and Gal, Yarin and Cipolla, Roberto},
   title     = {Multi-task learning using uncertainty to weigh losses for scene geometry and semantics},
   booktitle = {Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR)},
   pages     = {7482--7491},
-  year      = {2018},
-  % Learnable log-variance weights for multi-task loss balancing; used in pinn.train().
+  year      = {2018}
 }
 
-% EU energy crisis 2022 (placeholder — replace with preferred source)
 @misc{eu2022crisis,
-  author = {{European Commission}},
-  title  = {{REPowerEU} Plan: Joint European action for more affordable, secure and sustainable energy},
-  year   = {2022},
-  url    = {https://commission.europa.eu/strategy-and-policy/priorities-2019-2024/european-green-deal/repowereu-affordable-secure-and-sustainable-energy-europe_en},
-  % Contextual reference for the 2022 European energy crisis discussed in Sec.~5.2.
+  author       = {{European Commission}},
+  title        = {{REPowerEU} Plan: Joint European action for more affordable, secure and sustainable energy},
+  howpublished = {\url{https://commission.europa.eu/strategy-and-policy/priorities-2019-2024/european-green-deal/repowereu_en}},
+  year         = {2022}
 }
 
-% Lithuanian energy independence via Klaipeda LNG (placeholder)
 @article{misiunas2023klaipeda,
   author  = {Misi\=unas, Tomas},
-  title   = {Energy security in the {Baltic} states: The role of the {Klaip\k{e}da} {LNG} terminal post-2022},
+  title   = {Energy security in the {Baltic} states: The role of the {Klaip\.eda} {LNG} terminal post-2022},
   journal = {Energy Policy},
   year    = {2023},
-  note    = {[Placeholder — replace with preferred reference for LT energy independence context]},
+  note    = {Placeholder --- replace with preferred reference for LT energy-independence context}
 }
 
-% EU ETS carbon pricing
-@article{eu2023ets,
-  author  = {{European Commission}},
-  title   = {{EU} emissions trading system ({EU} {ETS}): Phase 4 review and the role of stationary installations},
-  year    = {2023},
-  note    = {[Placeholder — replace with preferred peer-reviewed citation for EU ETS pricing context]},
+@misc{eu2023ets,
+  author = {{European Commission}},
+  title  = {{EU} emissions trading system ({EU} {ETS}): Phase 4 review and the role of stationary installations},
+  year   = {2023},
+  note   = {Placeholder --- replace with preferred peer-reviewed citation for EU ETS pricing context}
 }
 
-% Open-Meteo
 @misc{openmeteo,
-  author = {{Open-Meteo}},
-  title  = {Historical weather {API} (ERA5 reanalysis) and {Marine} {API}},
-  year   = {2024},
-  url    = {https://open-meteo.com},
-  % Data source for ambient air and sea surface temperature.
+  author       = {{Open-Meteo}},
+  title        = {Historical weather {API} ({ERA5} reanalysis) and {Marine} {API}},
+  howpublished = {\url{https://open-meteo.com}},
+  year         = {2024}
 }

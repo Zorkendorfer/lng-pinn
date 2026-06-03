@@ -31,3 +31,14 @@ Thumbs.db
 # TensorBoard / wandb
 runs/
 wandb/
+
+# LaTeX build artifacts + Overleaf bundle (regenerable from paper/main.tex)
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.pdf
+paper/*.synctex.gz
+paper/_overleaf/
+paper/overleaf_bundle.zip

@@ -7,30 +7,34 @@
 % =========================================================================
 \documentclass[11pt]{article}
 
+% Package order matters: inputenc/fontenc first, amsmath before siunitx and
+% cleveref, natbib before hyperref, and cleveref last (it must come after both
+% amsmath and hyperref or it raises a fatal "must be loaded after amsmath").
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
 \usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
 \usepackage{siunitx}
 \usepackage{booktabs}
 \usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{natbib}
 \usepackage{hyperref}
 \usepackage{cleveref}
-\usepackage{amsmath}
-\usepackage{natbib}
-\usepackage{xcolor}
-\usepackage[utf8]{inputenc}
-\usepackage[T1]{fontenc}
 
 % --- Custom units (siunitx 3.x DeclareSIUnit syntax) ---------------------
 % EUR sign and tCO2 unit don't ship with siunitx by default; declare here so
 % the price expressions like \SI{80}{\EUR\per\tCOtwo} render cleanly.
+\usepackage{eurosym}  % provides \euro for the EUR glyph (load before use below)
 \DeclareSIUnit{\EUR}{\text{\euro}}
+\DeclareSIUnit{\eur}{\text{\euro}}   % lowercase alias: prose uses \eur\per\MWh
 \DeclareSIUnit{\tCOtwo}{t_{\text{CO}_2}}
-\DeclareSIUnit{\MWh}{MWh}
-\usepackage{eurosym}  % provides \euro for the EUR glyph
+\DeclareSIUnit{\MWh}{\mega\watt\hour}
 
 \graphicspath{{../results/figures/}}  % so \includegraphics resolves to results/figures/
 
 \title{When does composition awareness pay off in FSRU dispatch?\\
-       A physics-by-construction neural surrogate under day-ahead prices\\
+       A physics-by-construction neural surrogate under day-ahead prices
        and EU ETS carbon costs}
 \author{Jonas Kalnius}
 \date{\today}
@@ -47,7 +51,7 @@ We present a physics-informed neural network (PINN) surrogate of FSRU
 regasification in which the energy balance and pump-work relations hold
 \emph{exactly by construction}, and couple it to day-ahead electricity prices
 and an EU-ETS-style carbon cost in a rolling-horizon dispatch optimisation.
-On the Independence FSRU (Klaip\k{e}da, Lithuania) over 2021--2025 we show
+On the Independence FSRU (Klaip\.eda, Lithuania) over 2021--2025 we show
 that composition-aware dispatch saves
 \textbf{$+2.50\%$ ($95\%$~CI $[+2.01, +2.99]$, $p < 10^{-5}$, $n=50$)} over a
 realistic lagged-composition baseline at the current EU ETS price of
@@ -69,7 +73,7 @@ trajectory while running $\sim$\textbf{$Z\times$} faster (fill in $Z$).
 %
 % 1. FSRU regasification matters as an energy-security lever. Post-2022
 %    European LNG imports grew sharply; Lithuania severed Russian gas via
-%    the Klaip\k{e}da terminal in 2014 and has remained a single-FSRU
+%    the Klaip\.eda terminal in 2014 and has remained a single-FSRU
 %    market since. Operational optimisation of a single asset has direct
 %    public-policy relevance.
 % 2. The thermodynamic state of the LNG cargo (composition) varies
@@ -172,22 +176,22 @@ fragile point estimate.
 % State variables: composition x \in S^6 (mole fractions of CH4, C2H6,
 % C3H8, n-C4H10, i-C4H10, N2), send-out mass flow m_dot (kg/s), ambient
 % air T_amb, seawater T_sw.
-% Reference plant: Independence FSRU, Klaip\k{e}da
+% Reference plant: Independence FSRU, Klaip\.eda
 % (\SI{55.71}{\degree}N, \SI{21.13}{\degree}E), 170\,000~\si{\meter\cubed}
 % storage, ORV+trim-heater configuration.
 
 We model the terminal at the level of a steady-state hourly operating point,
 which is the natural granularity for day-ahead dispatch. The equipment train
 follows the Klaip\.eda ``Independence'' configuration: a cryogenic pump
-raises LNG from storage pressure ($\approx$\SI{1}{bar}) to a send-out
-pressure of \SI{80}{bar}; an open-rack vaporiser transfers heat from
+raises LNG from storage pressure ($\approx$1~bar) to a send-out
+pressure of 80~bar; an open-rack vaporiser transfers heat from
 seawater to vaporise the stream; and an electric trim heater supplies any
 residual duty needed to reach the send-out temperature when the seawater
 approach alone is insufficient. Each operating point is defined by four
 exogenous quantities: the cargo composition
 $x \in \mathcal{S}^6$ (mole fractions of CH$_4$, C$_2$H$_6$, C$_3$H$_8$,
 $n$-C$_4$H$_{10}$, $i$-C$_4$H$_{10}$, and N$_2$, summing to one), the
-send-out mass flow $\dot m$ (\si{kg/s}), the ambient air temperature
+send-out mass flow $\dot m$ (\si{\kilo\gram\per\second}), the ambient air temperature
 $T_{\text{amb}}$, and the seawater temperature $T_{\text{sw}}$. The single
 controllable variable is $\dot m$; composition and weather are given. The
 reference plant has \SI{170000}{\meter\cubed} of storage and is sited at
@@ -214,12 +218,12 @@ lets us test whether composition awareness is robust across regimes rather
 than an artefact of one.
 
 The cargo trajectory is synthetic but physically grounded. Every
-$\approx$\SI{12}{days} a new cargo arrives, drawn from a small set of
+$\approx$\SI{12}{\day} a new cargo arrives, drawn from a small set of
 archetypal supplier compositions (US Gulf, Qatar, Norway, Algeria) with
 GIIGNL-reported mole fractions \citep{giignl2023}; the inter-arrival
-interval carries a $\sigma=\SI{2}{day}$ jitter. At each arrival the in-tank
+interval carries a $\sigma=\SI{2}{\day}$ jitter. At each arrival the in-tank
 composition does not switch instantaneously but is approximated by a
-\SI{5}{day} linear blend between the outgoing and incoming cargoes, a
+\SI{5}{\day} linear blend between the outgoing and incoming cargoes, a
 first-order model of tank mixing. The sequence of cargoes and their jitter
 are controlled by a random seed; we exploit this in \cref{sec:seed-protocol}
 to quantify cargo-schedule variance. Composition is exogenous to dispatch in
@@ -249,7 +253,8 @@ every strategy---the operator chooses flow, not cargo.
 The decision variable is the hourly send-out flow $\dot m_t$ over a
 seven-day ($H=168$ hour) horizon, and \cref{eq:dispatch} minimises the sum
 of electricity and carbon cost. Here $c_1 = 3600/1000$ converts
-\si{kg/s}$\times$\si{kWh/kg} into the \si{MWh} and \si{tonne} units of the
+\si{\kilo\gram\per\second}\,$\times$\,\si{\kilo\watt\hour\per\kilo\gram} into the
+\si{\mega\watt\hour} and \si{\tonne} units of the
 two prices; $p^{\text{elec}}_t$ is the hourly day-ahead price, $p^{\text{co2}}$
 the carbon price, $W_{\text{total}}$ the per-kilogram electrical energy from
 the surrogate, and $\phi_{\text{CO}_2}(x_t)$ the per-kilogram CO$_2$ emission
@@ -260,10 +265,11 @@ $\phi_{\text{CO}_2}$, and at EU ETS prices that difference is large in
 absolute euros.
 
 The problem is solved as a rolling-horizon backtest: at each step we
-optimise the next \SI{168}{hours}, commit the first \SI{24}{hours}, advance
+optimise the next \SI{168}{\hour}, commit the first \SI{24}{\hour}, advance
 the window by a day, and carry the resulting tank inventory forward.
-Within a window, flow is discretised to 15 levels between \SI{10}{kg/s} and
-\SI{80}{kg/s}, turning \cref{eq:dispatch} into a linear programme solved by
+Within a window, flow is discretised to 15 levels between
+\SI{10}{\kilo\gram\per\second} and \SI{80}{\kilo\gram\per\second}, turning
+\cref{eq:dispatch} into a linear programme solved by
 SciPy's HiGHS backend. Constraints are: cumulative send-out at least the
 contracted demand over the horizon, tank inventory within
 $[5\%, 95\%]$ of capacity at every hour, the per-hour flow bounds above, and
@@ -293,7 +299,7 @@ The ground truth against which the surrogate is trained and validated is a
 steady-state plant model built on the CoolProp HEOS backend for LNG mixture
 thermodynamics \citep{bell2014pure}. For each operating point
 $(x, \dot m, T_{\text{amb}}, T_{\text{sw}})$ it computes pump work from the
-incompressible-liquid relation, ORV duty assuming a \SI{3}{K} seawater
+incompressible-liquid relation, ORV duty assuming a \SI{3}{\kelvin} seawater
 approach temperature, and trim-heater duty as the residual enthalpy needed
 to reach the send-out temperature. One modelling detail proved
 consequential: the storage state must be set as saturated liquid at storage
@@ -483,7 +489,7 @@ distribution.
 % pre- and post-crisis years 60-95 EUR/MWh.
 %
 % \textbf{Weather:} Open-Meteo ERA5 reanalysis and Marine API at the
-% Klaip\k{e}da terminal location (\SI{55.71}{\degree}N,
+% Klaip\.eda terminal location (\SI{55.71}{\degree}N,
 % \SI{21.13}{\degree}E). Hourly ambient temperature
 % (\SI{252}{\kelvin}-\SI{305}{\kelvin}, i.e. -21~\si{\celsius} to
 % +32~\si{\celsius}) and sea surface temperature (\SI{273}{\kelvin}-\SI{293}{\kelvin}).
@@ -517,8 +523,8 @@ trained on.
 
 \paragraph{Cargo compositions.} Synthetic, as described in
 \cref{sec:system}: GIIGNL archetype mole-fraction vectors \citep{giignl2023}
-for US Gulf, Qatar, Norway, and Algeria, sequenced on a \SI{12}{day} average
-inter-cargo interval ($\sigma=\SI{2}{day}$) with a \SI{5}{day} blend at each
+for US Gulf, Qatar, Norway, and Algeria, sequenced on a \SI{12}{\day} average
+inter-cargo interval ($\sigma=\SI{2}{\day}$) with a \SI{5}{\day} blend at each
 transition. Composition is exogenous to dispatch in all strategies.
 
 \paragraph{Training set.} 20{,}000 stratified Latin-hypercube samples over
@@ -645,7 +651,7 @@ regime-specific null and return to its mechanism in \cref{sec:2022}.
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep.pdf}
   \caption{Composition-aware dispatch saving versus carbon price,
-    Klaip\k{e}da Independence FSRU, 2021--2025. \textbf{Panel A:}
+    Klaip\.eda Independence FSRU, 2021--2025. \textbf{Panel A:}
     saving against the lagged-composition baseline. Faint colored
     curves are single-seed sweeps for each year; the bold black line
     is the cross-year mean. Red error-bar markers at \SI{80}{\EUR\per\tCOtwo}
@@ -741,7 +747,7 @@ captions are written to stand alone.
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep_2021.pdf}
   \caption{\textbf{2021 composition-aware saving vs.\ carbon price}
-    (Klaip\k{e}da Independence FSRU, single cargo realisation;
+    (Klaip\.eda Independence FSRU, single cargo realisation;
     10-seed sensitivity overlay at \SI{80}{\EUR\per\tCOtwo}). The blue curve
     traces aware-vs-lagged saving for the default cargo schedule
     (seed~42) as the EU ETS price varies; the red marker at
@@ -762,7 +768,7 @@ captions are written to stand alone.
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep_2022.pdf}
   \caption{\textbf{2022 composition-aware saving vs.\ carbon price}
-    (Klaip\k{e}da Independence FSRU, single cargo realisation;
+    (Klaip\.eda Independence FSRU, single cargo realisation;
     10-seed sensitivity overlay at \SI{80}{\EUR\per\tCOtwo}). The blue curve
     traces aware-vs-lagged saving for the default cargo schedule
     (seed~42); the red marker at \SI{80}{\EUR\per\tCOtwo} shows the 10-seed
@@ -786,7 +792,7 @@ captions are written to stand alone.
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep_2023.pdf}
   \caption{\textbf{2023 composition-aware saving vs.\ carbon price}
-    (Klaip\k{e}da Independence FSRU, single cargo realisation;
+    (Klaip\.eda Independence FSRU, single cargo realisation;
     10-seed sensitivity overlay at \SI{80}{\EUR\per\tCOtwo}). The blue curve
     traces aware-vs-lagged saving for the default cargo schedule
     (seed~42); the red marker at \SI{80}{\EUR\per\tCOtwo} shows the 10-seed
@@ -807,7 +813,7 @@ captions are written to stand alone.
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep_2024.pdf}
   \caption{\textbf{2024 composition-aware saving vs.\ carbon price}
-    (Klaip\k{e}da Independence FSRU, single cargo realisation;
+    (Klaip\.eda Independence FSRU, single cargo realisation;
     10-seed sensitivity overlay at \SI{80}{\EUR\per\tCOtwo}). The blue curve
     traces aware-vs-lagged saving for the default cargo schedule
     (seed~42); the red marker at \SI{80}{\EUR\per\tCOtwo} shows the 10-seed
@@ -827,7 +833,7 @@ captions are written to stand alone.
   \centering
   \includegraphics[width=\textwidth]{fig6_carbon_sweep_2025.pdf}
   \caption{\textbf{2025 composition-aware saving vs.\ carbon price}
-    (Klaip\k{e}da Independence FSRU, single cargo realisation;
+    (Klaip\.eda Independence FSRU, single cargo realisation;
     10-seed sensitivity overlay at \SI{80}{\EUR\per\tCOtwo}). The blue curve
     traces aware-vs-lagged saving for the default cargo schedule
     (seed~42); the red marker at \SI{80}{\EUR\per\tCOtwo} shows the 10-seed
@@ -975,8 +981,8 @@ varies only $\sim3$--$8\%$, whereas day-ahead prices vary by factors of three
 to two hundred; the optimiser has so much price arbitrage to capture that any
 composition-driven adjustment is a rounding error. Adding the carbon term
 changes the arithmetic. Combustion stoichiometry gives an emission factor
-$\phi_{\text{CO}_2}(x)$ ranging from \SI{2.74}{kg} CO$_2$/kg fuel for pure
-methane to $\sim$\SI{2.95}{} for heavy cargoes---a $\sim7\%$ spread,
+$\phi_{\text{CO}_2}(x)$ ranging from $2.74$~kg~CO$_2$/kg~fuel for pure
+methane to $\sim 2.95$ for heavy cargoes---a $\sim7\%$ spread,
 comparable in magnitude to the $W_{\text{total}}$ spread but, crucially,
 priced at EU ETS levels where it is large in absolute euros and scales
 directly with composition rather than through the thermodynamics. Carbon
@@ -1133,7 +1139,7 @@ tuning the loss weights.
 
 % --- DRAFT ---
 % \textbf{Single terminal.} Results are for one FSRU configuration
-% (ORV + trim heater, Klaip\k{e}da layout). Different topologies
+% (ORV + trim heater, Klaip\.eda layout). Different topologies
 % (e.g. submerged combustion vaporiser, ambient air vaporiser) would
 % shift the relative importance of trim-heater electricity vs.
 % seawater heat, changing the surrogate's input-output structure and
