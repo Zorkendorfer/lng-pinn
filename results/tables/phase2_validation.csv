@@ -1,3 +1,2 @@
 script,carbon_price_eur_per_t,seed,strategy,n_total,n_sampled,mean_rel_err,median_abs_rel_err,p95_abs_rel_err,max_abs_rel_err
-07_carbon_sweep,80.0,,aware,200,10,0.08333333333333336,0.1,0.19,0.2
-06_seed_sensitivity,80.0,42,lagged,200,10,0.08333333333333336,0.1,0.19,0.2
+05_make_figures_fidelity,80.0,42,aware,1000,1000,1.6427119929618427e-07,1.5414747223108094e-07,2.5931447872662438e-06,9.270122604654318e-05

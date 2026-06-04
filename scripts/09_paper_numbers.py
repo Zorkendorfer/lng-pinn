@@ -1,0 +1,235 @@
+"""Check and regenerate paper-facing numeric summaries.
+
+This script keeps the manuscript's headline numbers tied to the CSV tables
+produced by the pipeline. By default it only prints checks. With ``--write`` it
+also writes:
+
+- results/tables/paper_numbers_summary.csv
+- paper/seed_supplement.tex
+
+With ``--refresh-validation`` it replaces results/tables/phase2_validation.csv
+with a compact diagnostic row derived from results/tables/fidelity.csv. This is
+useful when old E2 validation rows were produced by stale caches or a previous
+schema.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+RESULTS = ROOT / "results" / "tables"
+PAPER = ROOT / "paper"
+
+
+def _fmt_pct(x: float) -> str:
+    return f"{x:+.2f}"
+
+
+def _load_csv(name: str) -> pd.DataFrame:
+    path = RESULTS / name
+    if not path.exists():
+        raise FileNotFoundError(f"missing {path}")
+    return pd.read_csv(path)
+
+
+def build_summary() -> pd.DataFrame:
+    seed_sig = _load_csv("seed_significance.csv")
+    fidelity = _load_csv("fidelity.csv")
+    surrogate = _load_csv("surrogate_eval.csv")
+    sweep = _load_csv("carbon_sweep.csv")
+
+    lagged = seed_sig[seed_sig["baseline"] == "lagged"].copy()
+    aggregate = lagged[lagged["scope"].astype(str).str.startswith("ALL_")].iloc[0]
+
+    sweep0 = sweep[sweep["price_co2_eur_per_t"] == 0.0]["saving_vs_lagged_pct"].mean()
+    sweep80 = sweep[sweep["price_co2_eur_per_t"] == 80.0]["saving_vs_lagged_pct"].mean()
+
+    constant = sweep.copy()
+    constant["saving_vs_constant_pct"] = (
+        (constant["constant"] - constant["aware"]) / constant["constant"] * 100.0
+    )
+    constant0 = constant[constant["price_co2_eur_per_t"] == 0.0][
+        "saving_vs_constant_pct"
+    ].mean()
+    constant80 = constant[constant["price_co2_eur_per_t"] == 80.0][
+        "saving_vs_constant_pct"
+    ].mean()
+
+    w_total = surrogate[surrogate["channel"] == "W_total"].iloc[0]
+
+    rows = [
+        {
+            "metric": "headline_saving_vs_lagged_pct",
+            "value": aggregate["mean_pct"],
+            "display": _fmt_pct(float(aggregate["mean_pct"])),
+        },
+        {
+            "metric": "headline_ci95_lo_pct",
+            "value": aggregate["ci95_lo_pct"],
+            "display": _fmt_pct(float(aggregate["ci95_lo_pct"])),
+        },
+        {
+            "metric": "headline_ci95_hi_pct",
+            "value": aggregate["ci95_hi_pct"],
+            "display": _fmt_pct(float(aggregate["ci95_hi_pct"])),
+        },
+        {
+            "metric": "headline_p_two_sided",
+            "value": aggregate["p_two_sided"],
+            "display": f"{float(aggregate['p_two_sided']):.2g}",
+        },
+        {
+            "metric": "headline_seed_n",
+            "value": aggregate["n"],
+            "display": str(int(aggregate["n"])),
+        },
+        {
+            "metric": "single_seed_sweep_mean_saving_at_0_pct",
+            "value": sweep0,
+            "display": _fmt_pct(float(sweep0)),
+        },
+        {
+            "metric": "single_seed_sweep_mean_saving_at_80_pct",
+            "value": sweep80,
+            "display": _fmt_pct(float(sweep80)),
+        },
+        {
+            "metric": "single_seed_constant_flow_saving_at_0_pct",
+            "value": constant0,
+            "display": _fmt_pct(float(constant0)),
+        },
+        {
+            "metric": "single_seed_constant_flow_saving_at_80_pct",
+            "value": constant80,
+            "display": _fmt_pct(float(constant80)),
+        },
+        {
+            "metric": "w_total_mae_kwh_per_kg",
+            "value": w_total["MAE"],
+            "display": f"{float(w_total['MAE']):.3g}",
+        },
+        {
+            "metric": "w_total_r2",
+            "value": w_total["R2"],
+            "display": f"{float(w_total['R2']):.6f}",
+        },
+        {
+            "metric": "fidelity_median_abs_rel_error",
+            "value": fidelity["rel_error"].abs().median(),
+            "display": f"{float(fidelity['rel_error'].abs().median()):.3g}",
+        },
+        {
+            "metric": "fidelity_p95_abs_rel_error",
+            "value": fidelity["rel_error"].abs().quantile(0.95),
+            "display": f"{float(fidelity['rel_error'].abs().quantile(0.95)):.3g}",
+        },
+        {
+            "metric": "fidelity_max_abs_rel_error",
+            "value": fidelity["rel_error"].abs().max(),
+            "display": f"{float(fidelity['rel_error'].abs().max()):.3g}",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def write_seed_supplement() -> None:
+    df = _load_csv("seed_sensitivity.csv")
+    pivot = (
+        df.pivot_table(
+            index="seed",
+            columns="year",
+            values="saving_vs_lagged_pct",
+            aggfunc="first",
+        )
+        .sort_index()
+        .round(2)
+    )
+
+    lines = [
+        "% Auto-generated by scripts/09_paper_numbers.py --write",
+        "\\begin{table}[h]",
+        "  \\centering",
+        "  \\caption{Composition-aware saving versus the lagged-composition baseline by cargo-schedule seed and year at \\SI{80}{\\EUR\\per\\tCOtwo}. Values are percentages.}",
+        "  \\label{tab:seed-supplement}",
+        "  \\begin{tabular}{rrrrrr}",
+        "    \\toprule",
+        "    Seed & 2021 & 2022 & 2023 & 2024 & 2025 \\\\",
+        "    \\midrule",
+    ]
+    for seed, row in pivot.iterrows():
+        values = " & ".join(f"{float(row[year]):+.2f}" for year in pivot.columns)
+        lines.append(f"    {int(seed)} & {values} \\\\")
+    lines.extend([
+        "    \\bottomrule",
+        "  \\end{tabular}",
+        "\\end{table}",
+        "",
+    ])
+    (PAPER / "seed_supplement.tex").write_text("\n".join(lines), encoding="utf-8")
+
+
+def refresh_phase2_validation() -> None:
+    fidelity = _load_csv("fidelity.csv")
+    rel = fidelity["rel_error"].dropna()
+    row = pd.DataFrame([{
+        "script": "05_make_figures_fidelity",
+        "carbon_price_eur_per_t": 80.0,
+        "seed": 42,
+        "strategy": "aware",
+        "n_total": len(fidelity),
+        "n_sampled": len(fidelity),
+        "mean_rel_err": float(rel.mean()),
+        "median_abs_rel_err": float(rel.abs().median()),
+        "p95_abs_rel_err": float(rel.abs().quantile(0.95)),
+        "max_abs_rel_err": float(rel.abs().max()),
+    }])
+    row.to_csv(RESULTS / "phase2_validation.csv", index=False)
+
+
+def check_phase2_validation() -> str:
+    path = RESULTS / "phase2_validation.csv"
+    if not path.exists():
+        return "phase2_validation.csv: missing"
+    df = pd.read_csv(path)
+    if df.empty or "max_abs_rel_err" not in df.columns:
+        return "phase2_validation.csv: malformed"
+    max_err = float(df["max_abs_rel_err"].max())
+    if max_err > 1e-3:
+        return (
+            "phase2_validation.csv: suspicious "
+            f"(max_abs_rel_err={max_err:.3g}); refresh from fidelity.csv"
+        )
+    return f"phase2_validation.csv: ok (max_abs_rel_err={max_err:.3g})"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--write", action="store_true", help="write summary CSV and appendix table")
+    parser.add_argument(
+        "--refresh-validation",
+        action="store_true",
+        help="replace phase2_validation.csv with a fidelity-derived diagnostic row",
+    )
+    args = parser.parse_args()
+
+    summary = build_summary()
+    print(summary[["metric", "display"]].to_string(index=False))
+    print(check_phase2_validation())
+
+    if args.write:
+        summary.to_csv(RESULTS / "paper_numbers_summary.csv", index=False)
+        write_seed_supplement()
+        print("wrote results/tables/paper_numbers_summary.csv")
+        print("wrote paper/seed_supplement.tex")
+
+    if args.refresh_validation:
+        refresh_phase2_validation()
+        print("refreshed results/tables/phase2_validation.csv")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,15 @@
+metric,value,display
+headline_saving_vs_lagged_pct,2.4957,+2.50
+headline_ci95_lo_pct,2.0081,+2.01
+headline_ci95_hi_pct,2.9832,+2.98
+headline_p_two_sided,3.4814108127125102e-06,3.5e-06
+headline_seed_n,10.0,10
+single_seed_sweep_mean_saving_at_0_pct,0.029035206177646555,+0.03
+single_seed_sweep_mean_saving_at_80_pct,1.3954848031191518,+1.40
+single_seed_constant_flow_saving_at_0_pct,21.89251265457336,+21.89
+single_seed_constant_flow_saving_at_80_pct,1.4810390759640755,+1.48
+w_total_mae_kwh_per_kg,2.341435219932464e-06,2.34e-06
+w_total_r2,0.9999933008569332,0.999993
+fidelity_median_abs_rel_error,1.5414747223108094e-07,1.54e-07
+fidelity_p95_abs_rel_error,2.5931447872662438e-06,2.59e-06
+fidelity_max_abs_rel_error,9.270122604654318e-05,9.27e-05

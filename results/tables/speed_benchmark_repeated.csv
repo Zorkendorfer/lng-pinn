@@ -1,0 +1,2 @@
+n,surrogate_repeats,coolprop_repeats,surrogate_median_s,coolprop_median_s,speedup_x,surrogate_calls_per_s,coolprop_calls_per_s,python,machine,processor
+10000,9,3,0.063960,707.580782,11062.9,156348.1,14.1,3.11.7,macOS-26.5-arm64-arm-64bit,arm

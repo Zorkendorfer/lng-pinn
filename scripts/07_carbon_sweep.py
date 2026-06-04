@@ -1,7 +1,7 @@
 """v1.3 carbon-price sweep — the headline figure.
 
 Sweeps CO2 prices ∈ {0, 20, 40, 80, 120, 160} EUR/tCO2. For each price:
-  1. Run dispatch + 5 baselines on the full 3-year timeseries via a
+  1. Run dispatch + 5 baselines on the full multi-year timeseries via a
      programmatic entry point (no shelling out to 04_run_dispatch.py).
   2. Re-evaluate each strategy's schedule through CoolProp to get the
      true cost (same logic as 05_make_figures.py's build_true_cost_summary).
@@ -19,6 +19,7 @@ this script runs them serially — the inner dispatch is already parallelised.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -353,6 +354,11 @@ def _thermo_key(
     )
 
 
+def _stable_int_hash(text: str) -> int:
+    """Deterministic small integer hash for validation sampling."""
+    return int(hashlib.blake2b(text.encode("utf-8"), digest_size=4).hexdigest(), 16)
+
+
 def _true_cost_for_strategy(
     dispatch_df: pd.DataFrame,
     ts_df: pd.DataFrame,
@@ -412,7 +418,7 @@ def _true_cost_for_strategy(
     if validation_sample_frac >= 1.0:
         sample_mask = np.ones(n, dtype=bool)
     else:
-        seed = (int(carbon_price * 1000) * 9973 + hash(label) % 9973) & 0x7FFFFFFF
+        seed = (int(carbon_price * 1000) * 9973 + _stable_int_hash(label)) & 0x7FFFFFFF
         rng = np.random.default_rng(seed)
         n_sample = max(1, int(round(n * validation_sample_frac)))
         sample_idx = np.sort(rng.choice(n, size=n_sample, replace=False))
