@@ -5,6 +5,7 @@ Reports mean ± std of yearly saving (aware vs blind-horizon) across seeds.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -145,6 +146,11 @@ def _thermo_key(
     )
 
 
+def _stable_int_hash(text: str) -> int:
+    """Deterministic small integer hash for validation sampling."""
+    return int(hashlib.blake2b(text.encode("utf-8"), digest_size=4).hexdigest(), 16)
+
+
 # Canonical column order — must match scripts/07_carbon_sweep.py's
 # _VALIDATION_COLS. Without an agreed schema the per-row CSV append from
 # whichever script writes second silently mis-aligns values into the
@@ -240,7 +246,11 @@ def _eval_true_cost_for_seed_strategy(
     if validation_sample_frac >= 1.0:
         sample_mask = np.ones(n, dtype=bool)
     else:
-        sd = (int(carbon_price * 1000) * 9973 + seed * 31 + hash(strategy) % 9973) & 0x7FFFFFFF
+        sd = (
+            int(carbon_price * 1000) * 9973
+            + seed * 31
+            + _stable_int_hash(strategy)
+        ) & 0x7FFFFFFF
         rng = np.random.default_rng(sd)
         n_sample = max(1, int(round(n * validation_sample_frac)))
         sample_idx = np.sort(rng.choice(n, size=n_sample, replace=False))
@@ -826,7 +836,7 @@ def main() -> None:
     # v1.4 C0 — significance table. The paper's claim is about the *mean*
     # saving across composition seeds, so report SE = std/sqrt(n), the
     # one-sample t-stat against 0, and the two-sided p-value. Both per-year
-    # and pooled (each seed's 3-year-mean saving, n = #seeds) rows are written.
+    # and pooled (each seed's full-period mean saving, n = #seeds) rows are written.
     significance = _build_significance_table(results_df)
     significance.to_csv(RESULTS_DIR / "seed_significance.csv", index=False)
 
@@ -848,7 +858,7 @@ def main() -> None:
 def _build_significance_table(results_df: pd.DataFrame) -> pd.DataFrame:
     """Per-year and pooled one-sample t-tests of aware-vs-baseline saving vs 0.
 
-    The pooled row collapses each seed to its 3-year-mean saving first, so
+    The pooled row collapses each seed to its full-period mean saving first, so
     n = number of seeds and the rows are independent draws over composition
     realisations — the correct unit for the headline confidence interval.
     """
@@ -862,7 +872,8 @@ def _build_significance_table(results_df: pd.DataFrame) -> pd.DataFrame:
             rows.append(_ttest_row(g[col].to_numpy(), baseline, str(int(year)), stats))
 
         per_seed = results_df.groupby("seed")[col].mean().to_numpy()
-        rows.append(_ttest_row(per_seed, baseline, "ALL_3yr_mean", stats))
+        year_count = results_df["year"].nunique()
+        rows.append(_ttest_row(per_seed, baseline, f"ALL_{year_count}yr_mean", stats))
 
     return pd.DataFrame(rows)
 

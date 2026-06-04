@@ -54,15 +54,16 @@ couple it to day-ahead electricity prices and an EU-ETS-style carbon cost in a
 rolling-horizon dispatch optimisation.
 On the Independence FSRU (Klaip\.eda, Lithuania) over 2021--2025 we show
 that composition-aware dispatch saves
-\textbf{$+2.58\%$ ($95\%$~CI $[+2.08, +3.07]$, $p=9.6\times10^{-7}$,
+\textbf{$+2.50\%$ ($95\%$~CI $[+2.01, +2.98]$, $p=3.5\times10^{-6}$,
 $n=10$ seeds)} over a realistic lagged-composition baseline at the reference
 EU ETS price of \SI{80}{\EUR\per\tCOtwo}. Without carbon pricing the saving
 collapses to zero. We further show that earlier soft-physics surrogates
 produced spurious $4$--$7\%$ composition savings that vanish under hard
 physics, suggesting a methodological pitfall relevant beyond LNG
 regasification. The surrogate matches the CoolProp ground truth to a median
-relative cost error below $10^{-4}$ on the dispatch trajectory; the explicit
-CoolProp-versus-surrogate speed benchmark is reported with the released code.
+absolute relative cost error of $1.5\times10^{-7}$ on the dispatch trajectory
+and runs approximately $1.1\times 10^4$ times faster than serial CoolProp HEOS
+on a repeated 10,000-point benchmark.
 \end{abstract}
 
 % =========================================================================
@@ -163,8 +164,8 @@ network predicts only the genuinely nonlinear unknowns. (ii) Using this
 surrogate we characterise, parametrically in the carbon price, when
 composition-aware dispatch pays off, and find that the benefit is created by
 carbon pricing: at the reference EU ETS level of \SI{80}{\EUR\per\tCOtwo} it
-is \textbf{$+2.58\%$} versus a realistic lagged-composition baseline
-($95\%$~CI $[+2.08, +3.07]$, $p=9.6\times10^{-7}$, ten cargo-schedule seeds), and
+is \textbf{$+2.50\%$} versus a realistic lagged-composition baseline
+($95\%$~CI $[+2.01, +2.98]$, $p=3.5\times10^{-6}$, ten cargo-schedule seeds), and
 at zero carbon price it is statistically indistinguishable from zero.
 (iii) We document the soft-physics fabrication hazard above as a
 methodological warning and contribution in its own right: soft constraints can
@@ -598,14 +599,24 @@ the surrogate's accuracy on the dispatch trajectory the optimiser actually
 visits, which is concentrated near the flow bounds rather than spread
 uniformly over the envelope. We therefore re-evaluate a sample of the
 realised trajectory against CoolProp directly during the backtest (recorded
-in \texttt{results/tables/phase2\_validation.csv}); the median relative cost
-error there is below $10^{-4}$ across every (seed, year, strategy)
-combination. This validates the chain from Reality to CoolProp to surrogate;
-direct validation against plant operating data remains future work. The
-near-exact on-trajectory agreement is what licenses using the surrogate to
-compare strategies that differ by only a few percent in cost---and, as
-\cref{sec:methodological-warning} argues, is exactly what a soft-physics
+in \texttt{results/tables/phase2\_validation.csv}); on the 1000-row
+dispatch-trajectory sample, the median absolute relative cost error is
+$1.54\times10^{-7}$, the 95th percentile is $2.59\times10^{-6}$, and the
+maximum is $9.27\times10^{-5}$. This validates the chain from Reality to
+CoolProp to surrogate; direct validation against plant operating data remains
+future work. The near-exact on-trajectory agreement is what licenses using the
+surrogate to compare strategies that differ by only a few percent in cost---and,
+as \cref{sec:methodological-warning} argues, is exactly what a soft-physics
 surrogate fails to deliver.
+
+The speed benchmark is what makes the surrogate useful inside the rolling
+optimiser. On 10,000 sampled operating points, repeated batched surrogate
+inference took a median \SI{0.06396}{\second}, or approximately
+\num{156000} calls/s, while repeated serial CoolProp HEOS simulation took a
+median \SI{707.58}{\second}, or approximately \num{14.1} calls/s. The measured
+speedup is therefore $\num{1.11e4}\times$. This is a deliberately operational
+comparison: the optimiser queries the surrogate in batches, whereas CoolProp is
+called as a serial property simulator.
 
 \begin{table}[h]
   \centering
@@ -614,18 +625,17 @@ surrogate fails to deliver.
     construction; the other channels are learned. Per-channel MAE and
     $R^2$ are derived from results/tables/surrogate\_eval.csv. The
     on-trajectory validation sample reported in
-    results/tables/phase2\_validation.csv shows median relative cost
-    error below $10^{-4}$ across all (seed, year, strategy)
-    combinations.}
+    results/tables/phase2\_validation.csv shows median absolute relative cost
+    error $1.54\times10^{-7}$ on the dispatch trajectory.}
   \label{tab:surrogate-eval}
   \begin{tabular}{lrr}
     \toprule
     Channel & MAE & $R^2$ \\
     \midrule
-    $W_{\text{pump}}$ (kWh/kg)             & \num{0.0}     & 1.0000  \\
-    $W_{\text{total}}$ (kWh/kg)            & \num{5.5e-4}  & 0.9998  \\
-    $T_{\text{out}}$ (K)                   & \num{2.0e-4}  & 0.99999 \\
-    $e_{\text{exergy destruction}}$ (kWh/kg) & \num{9e-5}    & 0.9990  \\
+    $W_{\text{pump}}$ (kWh/kg)             & \num{0.0}      & 1.000000 \\
+    $W_{\text{total}}$ (kWh/kg)            & \num{2.34e-6}  & 0.999993 \\
+    $T_{\text{out}}$ (K)                   & \num{6.31e-5}  & 0.999998 \\
+    $e_{\text{exergy destruction}}$ (kWh/kg) & \num{3.26e-6} & 0.999999 \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -661,9 +671,9 @@ surrogate fails to deliver.
 The central finding is summarised in \cref{fig:6_main} and quantified in
 \cref{tab:seed-significance}. At the reference EU ETS price of
 \SI{80}{\EUR\per\tCOtwo}, composition-aware dispatch saves
-$\mathbf{+2.58\%}$ over the realistic lagged-composition baseline when each
-seed's five-year costs are pooled first
-($95\%$~CI $[+2.08, +3.07]$, $t=11.7$, $p=9.6\times10^{-7}$, $n=10$ seeds).
+$\mathbf{+2.50\%}$ over the realistic lagged-composition baseline when each
+seed's five-year mean saving is computed first
+($95\%$~CI $[+2.01, +2.98]$, $t=10.03$, $p=3.5\times10^{-6}$, $n=10$ seeds).
 The effect is created by carbon pricing: Panel A of \cref{fig:6_main} shows
 the aware-versus-lagged saving rising from essentially zero at
 $p^{\text{co2}}=0$ to its EU-ETS-level value and then plateauing, so the
@@ -721,9 +731,9 @@ regime-specific null and return to its mechanism in \cref{sec:2022}.
   \caption{Seed sensitivity at \SI{80}{\EUR\per\tCOtwo}: per-year and
     $t$-tests on the null that composition-aware dispatch saves nothing
     against the lagged-composition baseline. Per-year rows use $n=10$
-    cargo-schedule seeds. The five-year aggregate first pools costs within
-    each seed, then tests the resulting 10 seed-level savings; the years are
-    price regimes, not independent draws. SE is the standard error of the
+    cargo-schedule seeds. The five-year aggregate first averages each seed's
+    five yearly saving percentages, then tests the resulting 10 seed-level
+    means; the years are price regimes, not independent draws. SE is the standard error of the
     mean; 95\% CI is a Student's $t$ interval; $p$ is two-sided.}
   \label{tab:seed-significance}
   \begin{tabular}{lrrrrrr}
@@ -736,7 +746,7 @@ regime-specific null and return to its mechanism in \cref{sec:2022}.
     2024         & 10  & $+2.54$ & $0.56$ & $[+1.44, +3.64]$ & $4.54$ & $0.0014$ \\
     2025         & 10  & $+3.09$ & $0.22$ & $[+2.66, +3.53]$ & $13.85$ & $2.2 \times 10^{-7}$ \\
     \midrule
-    \textbf{5-year pooled} & \textbf{10} & $\mathbf{+2.58}$ & $\mathbf{0.22}$ & $\mathbf{[+2.08, +3.07]}$ & $\mathbf{11.70}$ & $\mathbf{9.6 \times 10^{-7}}$ \\
+    \textbf{5-year mean} & \textbf{10} & $\mathbf{+2.50}$ & $\mathbf{0.25}$ & $\mathbf{[+2.01, +2.98]}$ & $\mathbf{10.03}$ & $\mathbf{3.5 \times 10^{-6}}$ \\
     \bottomrule
   \end{tabular} \\[2pt]
   {\footnotesize $^{*}$ Not significant at $p = 0.05$. See \cref{sec:2022}.}
@@ -1347,8 +1357,9 @@ CoolProp ground truth is steady-state per operating point and omits
 transients (cargo transfer, tank cooldown); this is conventional for hourly
 dispatch but limits sub-hourly applicability. \textbf{Simulator dependence and
 plant validation:} the surrogate is validated against CoolProp, not against
-plant operating data. \textbf{Inherited thermodynamic error:} the surrogate matches CoolProp to $<10^{-4}$ median
-relative cost error on the trajectory, but the HEOS backend itself is less
+plant operating data. \textbf{Inherited thermodynamic error:} the surrogate matches CoolProp to a
+median absolute relative cost error of $1.54\times10^{-7}$ on the trajectory,
+but the HEOS backend itself is less
 accurate for heavy hydrocarbons near critical conditions
 \citep{bell2014pure}, and the surrogate inherits that. \textbf{Uncertainty:}
 we quantify cargo-schedule variance with 10 seeds but do not propagate
@@ -1362,8 +1373,8 @@ We asked whether knowing the composition of the LNG cargo helps an FSRU
 operator dispatch more cheaply, and found that the answer is conditional on
 carbon pricing. Coupling a physics-by-construction neural surrogate to a
 rolling-horizon dispatch over five years of Lithuanian day-ahead prices,
-composition-aware dispatch saves $+2.58\%$ ($95\%$~CI $[+2.08, +3.07]$,
-$p=9.6\times10^{-7}$, $n=10$ seeds) over a realistic lagged-composition baseline at the reference EU
+composition-aware dispatch saves $+2.50\%$ ($95\%$~CI $[+2.01, +2.98]$,
+$p=3.5\times10^{-6}$, $n=10$ seeds) over a realistic lagged-composition baseline at the reference EU
 ETS price, but nothing measurable at zero carbon price. The benefit is
 created by the carbon-cost differential between cargoes rather than by their
 thermodynamics, it is robust across four of five years, and it disappears
@@ -1377,7 +1388,10 @@ is unlocked by emissions pricing and is most dependable in normal-volatility
 markets. We also show that soft-physics surrogates can fabricate composition
 signals, and that the sign of the headline saving is robust to completed
 linear tank-mixing sweeps over $\tau_{\text{mix}}=\SIrange{1}{10}{\day}$ while
-the CSTR-kernel run remains the key remaining robustness check. Extending the
+the CSTR-kernel run remains the key remaining robustness check. The
+physics-by-construction surrogate is fast enough for this repeated optimisation
+loop: in the released benchmark it is approximately $\num{1.11e4}\times$ faster
+than serial CoolProp HEOS on the same sampled operating points. Extending the
 analysis to additional bidding zones, real assayed cargo data, alternative
 vaporiser topologies, operator-learning surrogates (DeepONet/FNO)
 \citep{lu2021deeponet,li2021fno},
@@ -1455,6 +1469,7 @@ uv run python scripts/07_carbon_sweep.py --workers 10 \
     --prices 0 20 40 60 70 80 90 100 120 160 \
     --validation-sample-frac 0.05
 uv run python scripts/05_make_figures.py --no-resume --carbon-price 80
+uv run python scripts/09_paper_numbers.py --write --refresh-validation
 \end{verbatim}
 The tank-mixing sweep is run separately with
 \begin{verbatim}
@@ -1467,6 +1482,17 @@ uv run python scripts/10_benchmark_speed.py
 \end{verbatim}
 It performs the requested 10,000 CoolProp HEOS calls and 10,000 surrogate
 forward passes on the same sampled operating points.
+For a smaller CSV-emitting benchmark with hardware metadata, run:
+\begin{verbatim}
+uv run python scripts/10_benchmark_surrogate.py --n 500
+\end{verbatim}
+This writes \texttt{results/tables/speed\_benchmark.csv}.
+
+\appendix
+\section{Seed-level sensitivity}
+\label{sec:appendix-seeds}
+
+\input{seed_supplement.tex}
 
 % =========================================================================
 \clearpage  % ensure no deferred float lands among the references

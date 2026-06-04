@@ -32,10 +32,16 @@ Thumbs.db
 runs/
 wandb/
 
+# Local pipeline logs
+run_*.log
+rerun_*.log
+
 # LaTeX build artifacts + Overleaf bundle (regenerable from paper/main.tex)
 paper/*.aux
 paper/*.bbl
 paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
 paper/*.log
 paper/*.out
 paper/*.pdf

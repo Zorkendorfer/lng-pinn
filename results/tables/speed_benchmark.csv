@@ -1,0 +1,2 @@
+n_requested,n_evaluated,coolprop_failures,pinn_seconds,coolprop_seconds,pinn_ms_per_point,coolprop_ms_per_point,speedup_x,python,machine,processor
+500,500,0,0.0055872500233817846,63.86591291599325,0.011174500046763569,127.7318258319865,11430.652404800965,3.11.7,macOS-26.5-arm64-arm-64bit,arm

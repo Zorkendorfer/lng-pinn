@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import statistics
 import sys
 import time
@@ -23,6 +24,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -59,7 +61,7 @@ def main() -> None:
         model(x_norm, aux)
 
     surrogate_times = []
-    for _ in range(args.surrogate_repeats):
+    for _ in tqdm(range(args.surrogate_repeats), desc="Surrogate repeats", unit="rep"):
         t0 = time.perf_counter()
         with torch.inference_mode():
             model(x_norm, aux)
@@ -67,9 +69,14 @@ def main() -> None:
 
     records = list(df[INPUT_COLS].itertuples(index=False, name=None))
     coolprop_times = []
-    for _ in range(args.coolprop_repeats):
+    for _ in tqdm(range(args.coolprop_repeats), desc="CoolProp repeats", unit="rep"):
         t0 = time.perf_counter()
-        for row in records:
+        for row in tqdm(
+            records,
+            desc="  CoolProp calls",
+            unit="pt",
+            leave=False,
+        ):
             simulate(
                 tuple(float(v) for v in row[:6]),
                 float(row[6]),
@@ -88,6 +95,24 @@ def main() -> None:
     print(f"speedup={speedup:.1f}")
     print(f"surrogate_calls_per_s={args.n / surrogate_median:.1f}")
     print(f"coolprop_calls_per_s={args.n / coolprop_median:.1f}")
+
+    out = pd.DataFrame([{
+        "n": int(args.n),
+        "surrogate_repeats": int(args.surrogate_repeats),
+        "coolprop_repeats": int(args.coolprop_repeats),
+        "surrogate_median_s": float(surrogate_median),
+        "coolprop_median_s": float(coolprop_median),
+        "speedup_x": float(speedup),
+        "surrogate_calls_per_s": float(args.n / surrogate_median),
+        "coolprop_calls_per_s": float(args.n / coolprop_median),
+        "python": platform.python_version(),
+        "machine": platform.platform(),
+        "processor": platform.processor(),
+    }])
+    out_path = Path("results/tables/speed_benchmark_repeated.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_path, index=False)
+    print(f"wrote {out_path}")
 
 
 if __name__ == "__main__":
