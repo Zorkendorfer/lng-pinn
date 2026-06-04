@@ -31,7 +31,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from lng_pinn.pinn import load
 from lng_pinn.plant import simulate
 
-
 INPUT_COLS = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2", "m_dot", "T_amb", "T_sw"]
 AUX_COLS = ["h_in_per_kg", "h_out_per_kg", "W_pump_expected"]
 
