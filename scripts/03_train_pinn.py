@@ -5,11 +5,13 @@ pump work) — they are enforced exactly by construction. Training is now
 pure supervised regression on (W_total, T_out, alpha, exergy), with
 uncertainty-weighted multi-task loss handled inside ``pinn.train``.
 
-The script still supports the v1.1 CLI flags (--lambda-e, --lambda-p,
---n-col) for backward compatibility; they are accepted but ignored.
+The script supports ``--arch hard`` (default) and ``--arch soft``. For the hard
+architecture, ``--lambda-e`` and ``--lambda-p`` remain compatibility flags; for
+the soft architecture they are active physics-penalty weights.
 """
 
 import argparse
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +22,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from lng_pinn.pinn import Scaler, train
+from lng_pinn.pinn import FINAL_PATH, SOFT_FINAL_PATH, Scaler, train
 
 PROCESSED_DIR = Path("data/processed")
 RESULTS_DIR = Path("results/tables")
@@ -33,6 +35,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=50_000)
     parser.add_argument("--batch", type=int, default=512)
+    parser.add_argument(
+        "--arch",
+        choices=["hard", "soft"],
+        default="hard",
+        help="Surrogate architecture: hard physics-by-construction or soft penalty-loss baseline.",
+    )
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--warmup", type=int, default=1_000)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
@@ -50,7 +58,20 @@ def main() -> None:
     parser.add_argument(
         "--no-resume",
         action="store_true",
-        help="Ignore any existing pinn_v1.ckpt and start from step 0.",
+        help="Ignore any existing architecture-specific checkpoint and start from step 0.",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Alias for --no-resume, kept for reproducibility command blocks.",
+    )
+    parser.add_argument(
+        "--out",
+        default=None,
+        help=(
+            "Optional final checkpoint path. Training still uses the architecture "
+            "default internally, then copies the final checkpoint here if different."
+        ),
     )
     parser.add_argument(
         "--ckpt-every",
@@ -130,10 +151,20 @@ def main() -> None:
         ema_decay=args.ema_decay,
         patience=args.patience,
         lambda_cost=args.lambda_c,
-        resume=not args.no_resume,
+        resume=not (args.no_resume or args.fresh),
         ckpt_every=args.ckpt_every,
+        lambda_energy=args.lambda_e,
+        lambda_pump=args.lambda_p,
+        arch=args.arch,
     )
-    print("Checkpoint saved to results/models/pinn_v1.pt")
+    final_path = FINAL_PATH if args.arch == "hard" else SOFT_FINAL_PATH
+    if args.out is not None:
+        requested = Path(args.out)
+        if requested != final_path:
+            requested.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(final_path, requested)
+            final_path = requested
+    print(f"Checkpoint saved to {final_path}")
 
     # Evaluate on held-out test set
     X_test_np = df_test[INPUT_COLS].values.astype(np.float32)
@@ -159,8 +190,11 @@ def main() -> None:
         print(f"  {col:24s}  MAE={mae:.5f}  RMSE={rmse:.5f}  R^2={r2:.4f}")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(eval_records).to_parquet(RESULTS_DIR / "surrogate_eval.parquet", index=False)
-    print("Surrogate evaluation saved to results/tables/surrogate_eval.parquet")
+    eval_path = RESULTS_DIR / (
+        "surrogate_eval.parquet" if args.arch == "hard" else "surrogate_eval_soft.parquet"
+    )
+    pd.DataFrame(eval_records).to_parquet(eval_path, index=False)
+    print(f"Surrogate evaluation saved to {eval_path}")
 
 
 if __name__ == "__main__":

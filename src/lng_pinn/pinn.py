@@ -61,6 +61,8 @@ from tqdm import tqdm
 RESULTS_DIR = Path("results/models")
 CKPT_PATH = RESULTS_DIR / "pinn_v1.ckpt"
 FINAL_PATH = RESULTS_DIR / "pinn_v1.pt"
+SOFT_CKPT_PATH = RESULTS_DIR / "pinn_soft.ckpt"
+SOFT_FINAL_PATH = RESULTS_DIR / "pinn_soft.pt"
 
 INPUT_DIM = 9   # CH4, C2H6, C3H8, nC4, iC4, N2, m_dot, T_amb, T_sw
 OUTPUT_DIM = 4  # W_pump, W_total, T_out, exergy_destruction (publicly preserved)
@@ -204,6 +206,45 @@ class PINNMLP(nn.Module):
         self._cached_scaler = scaler  # type: ignore[attr-defined]
 
 
+class SoftPINNMLP(nn.Module):
+    """Conventional soft-physics baseline that predicts every public output.
+
+    This is intentionally less clever than ``PINNMLP``: it predicts the four
+    normalised channels directly and relies on loss penalties to encourage pump
+    work and energy consistency. Keeping it in the same public forward shape
+    lets dispatch code compare soft and hard surrogates on equal footing.
+    """
+
+    def __init__(self, hidden: int = 256, n_blocks: int = 3) -> None:
+        super().__init__()
+        self.input_proj = nn.Linear(INPUT_DIM, hidden)
+        nn.init.xavier_uniform_(self.input_proj.weight)
+        nn.init.zeros_(self.input_proj.bias)
+        self.blocks = nn.ModuleList(_ResidualBlock(hidden) for _ in range(n_blocks))
+        self.head = nn.Linear(hidden, OUTPUT_DIM)
+        nn.init.xavier_uniform_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
+        self.act = nn.SiLU()
+
+    def forward(
+        self,
+        x_norm: Tensor,
+        aux: Tensor | None = None,
+        scaler: Scaler | None = None,
+    ) -> Tensor:
+        del aux, scaler
+        h = self.act(self.input_proj(x_norm))
+        for block in self.blocks:
+            h = block(h)
+        return self.head(h)
+
+    def set_output_constraints(self, scaler: Scaler) -> None:
+        del scaler
+
+    def attach_scaler(self, scaler: Scaler) -> None:
+        self._cached_scaler = scaler  # type: ignore[attr-defined]
+
+
 def energy_balance_residual(
     x_raw: Tensor,
     y_pred_raw: Tensor,
@@ -292,7 +333,7 @@ class _EMA:
 def _save_ckpt(
     path: Path,
     *,
-    model: PINNMLP,
+    model: nn.Module,
     optimizer: optim.Optimizer,
     scheduler: optim.lr_scheduler.LRScheduler,
     scaler: Scaler,
@@ -305,6 +346,7 @@ def _save_ckpt(
     device: torch.device,
     log_var: Tensor | None = None,
     ema_shadow: dict[str, Tensor] | None = None,
+    arch: str = "hard",
 ) -> None:
     """Atomic write of the full training-state checkpoint.
 
@@ -325,6 +367,7 @@ def _save_ckpt(
         "steps_since_improvement": steps_since_improvement,
         "done": done,
         "torch_rng_state": torch.get_rng_state(),
+        "arch": arch,
     }
     if log_var is not None:
         ckpt["log_var"] = log_var.detach().cpu().clone()
@@ -372,7 +415,8 @@ def train(
     lambda_cost: float = 1.0,
     resume: bool = True,
     ckpt_every: int | None = None,
-) -> PINNMLP:
+    arch: str = "hard",
+) -> nn.Module:
     """Train the v1.3 physics-constrained PINN.
 
     Inputs / labels are normalised (length-9 / length-4 respectively).
@@ -386,13 +430,17 @@ def train(
     resumed from the last full-state checkpoint (model + optimiser +
     scheduler + EMA + log_var + RNG) without losing progress.
     """
-    del X_col, h_in_col, h_out_col, W_pump_expected, lambda_energy, lambda_pump
-    del lambda_data  # all losses are now uncertainty-weighted
+    del X_col, h_in_col, h_out_col, W_pump_expected
+
+    if arch not in {"hard", "soft"}:
+        raise ValueError(f"unknown architecture {arch!r}; expected 'hard' or 'soft'")
 
     device = _device()
-    model = PINNMLP().to(device)
+    model: nn.Module = PINNMLP().to(device) if arch == "hard" else SoftPINNMLP().to(device)
     model.set_output_constraints(scaler.to(device))
     scaler = scaler.to(device)
+    ckpt_path = CKPT_PATH if arch == "hard" else SOFT_CKPT_PATH
+    final_path = FINAL_PATH if arch == "hard" else SOFT_FINAL_PATH
 
     X_train = X_train.to(device)
     y_train = y_train.to(device)
@@ -414,11 +462,8 @@ def train(
     # L = sum_k 0.5 * exp(-s_k) * loss_k + 0.5 * s_k.
     log_var = nn.Parameter(torch.zeros(4, device=device))
 
-    optimizer = optim.AdamW(
-        [*model.parameters(), log_var],
-        lr=lr,
-        weight_decay=weight_decay,
-    )
+    train_params = [*model.parameters(), log_var] if arch == "hard" else list(model.parameters())
+    optimizer = optim.AdamW(train_params, lr=lr, weight_decay=weight_decay)
 
     def lr_lambda(step: int) -> float:
         if step < warmup_steps:
@@ -438,9 +483,12 @@ def train(
     steps_since_improve = 0
 
     # ---- Resume from checkpoint if present ----------------------------------------
-    if resume and CKPT_PATH.exists():
+    if resume and ckpt_path.exists():
         try:
-            ckpt = _load_ckpt(CKPT_PATH, device)
+            ckpt = _load_ckpt(ckpt_path, device)
+            ckpt_arch = ckpt.get("arch", "hard")
+            if ckpt_arch != arch:
+                raise ValueError(f"checkpoint arch={ckpt_arch!r} but requested arch={arch!r}")
             stored_n_steps = ckpt.get("n_steps", n_steps)
             if stored_n_steps != n_steps:
                 print(
@@ -476,14 +524,19 @@ def train(
                 scaler_cpu = scaler.to("cpu")
                 model.set_output_constraints(scaler_cpu)
                 model.attach_scaler(scaler_cpu)
-                FINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+                final_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(
-                    {"model_state": model.state_dict(), "scaler": scaler_cpu, "version": "v1.3"},
-                    FINAL_PATH,
+                    {
+                        "model_state": model.state_dict(),
+                        "scaler": scaler_cpu,
+                        "version": "v1.3" if arch == "hard" else "soft-v1",
+                        "arch": arch,
+                    },
+                    final_path,
                 )
                 return model
         except Exception as exc:
-            print(f"  Could not resume from {CKPT_PATH.name}: {exc}; starting from step 0")
+            print(f"  Could not resume from {ckpt_path.name}: {exc}; starting from step 0")
             start_step = 0
             best_val = float("inf")
             best_state = None
@@ -493,7 +546,7 @@ def train(
     early_stopped = False
     pbar = tqdm(
         range(start_step, n_steps),
-        desc="Training PINN v1.3",
+        desc=f"Training {arch} surrogate",
         unit="step",
         initial=start_step,
         total=n_steps,
@@ -507,17 +560,27 @@ def train(
         ab = aux_train[idx]
         alpha_b = alpha_train[idx]
 
-        T_out_norm, alpha_pred, exergy_norm = model._net_outputs(xb)  # noqa: SLF001
         y_pred = model(xb, ab, scaler=scaler)
 
-        loss_alpha = (alpha_pred - alpha_b).pow(2).mean()
-        loss_W = (y_pred[:, 1] - yb[:, 1]).pow(2).mean()
-        loss_T = (T_out_norm - yb[:, 2]).pow(2).mean()
-        loss_E = (exergy_norm - yb[:, 3]).pow(2).mean()
-        losses = torch.stack([loss_alpha, loss_W, loss_T, loss_E])
-
-        # Kendall multi-task uncertainty weighting.
-        loss_mt = (0.5 * torch.exp(-log_var) * losses + 0.5 * log_var).sum()
+        if arch == "hard":
+            T_out_norm, alpha_pred, exergy_norm = model._net_outputs(xb)  # type: ignore[attr-defined]  # noqa: SLF001
+            loss_alpha = (alpha_pred - alpha_b).pow(2).mean()
+            loss_W = (y_pred[:, 1] - yb[:, 1]).pow(2).mean()
+            loss_T = (T_out_norm - yb[:, 2]).pow(2).mean()
+            loss_E = (exergy_norm - yb[:, 3]).pow(2).mean()
+            losses = torch.stack([loss_alpha, loss_W, loss_T, loss_E])
+            loss_mt = (0.5 * torch.exp(-log_var) * losses + 0.5 * log_var).sum()
+        else:
+            y_raw = scaler.unscale_y(y_pred)
+            loss_data = (y_pred - yb).pow(2).mean()
+            loss_energy = energy_balance_residual(xb, y_pred, scaler, ab[:, 0], ab[:, 1])
+            pump_rel = (y_raw[:, 0] - ab[:, 2]) / (ab[:, 2].abs() + 1.0e-6)
+            loss_pump = pump_rel.pow(2).mean()
+            loss_alpha = torch.zeros((), device=device)
+            loss_W = (y_pred[:, 1] - yb[:, 1]).pow(2).mean()
+            loss_T = (y_pred[:, 2] - yb[:, 2]).pow(2).mean()
+            loss_E = (y_pred[:, 3] - yb[:, 3]).pow(2).mean()
+            loss_mt = lambda_data * loss_data + lambda_energy * loss_energy + lambda_pump * loss_pump
 
         # A1: relative-cost loss, applied directly (not uncertainty-weighted) so
         # it acts as a calibration term independent of the Kendall weights drifting.
@@ -567,13 +630,15 @@ def train(
         # Periodic full-state checkpoint for resume.
         if (step + 1) % ckpt_every == 0:
             _save_ckpt(
-                CKPT_PATH,
+                ckpt_path,
                 model=model, optimizer=optimizer, scheduler=scheduler, scaler=scaler,
                 step=step + 1, n_steps=n_steps,
                 best_val_loss=best_val, best_state=best_state,
                 steps_since_improvement=steps_since_improve,
                 done=False, device=device,
-                log_var=log_var, ema_shadow=ema.shadow,
+                log_var=log_var if arch == "hard" else None,
+                ema_shadow=ema.shadow,
+                arch=arch,
             )
 
     # ---- Final weights: EMA vs best-by-val, pick the lower ------------------------
@@ -587,13 +652,15 @@ def train(
 
     # Final-state checkpoint marks completion.
     _save_ckpt(
-        CKPT_PATH,
+        ckpt_path,
         model=model, optimizer=optimizer, scheduler=scheduler, scaler=scaler,
         step=last_step + 1, n_steps=n_steps,
         best_val_loss=best_val, best_state=best_state,
         steps_since_improvement=steps_since_improve,
         done=True, device=device,
-        log_var=log_var, ema_shadow=ema.shadow,
+        log_var=log_var if arch == "hard" else None,
+        ema_shadow=ema.shadow,
+        arch=arch,
     )
 
     # Inference-only checkpoint for downstream scripts.
@@ -601,10 +668,15 @@ def train(
     scaler_cpu = scaler.to("cpu")
     model.set_output_constraints(scaler_cpu)
     model.attach_scaler(scaler_cpu)
-    FINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    final_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
-        {"model_state": model.state_dict(), "scaler": scaler_cpu, "version": "v1.3"},
-        FINAL_PATH,
+        {
+            "model_state": model.state_dict(),
+            "scaler": scaler_cpu,
+            "version": "v1.3" if arch == "hard" else "soft-v1",
+            "arch": arch,
+        },
+        final_path,
     )
     if early_stopped:
         print(f"  Early stop fired at step {last_step}; checkpoint marked done.")
@@ -642,11 +714,12 @@ def build_aux(
     return torch.from_numpy(aux)
 
 
-def load(path: str | Path = FINAL_PATH) -> tuple[PINNMLP, Scaler]:
+def load(path: str | Path = FINAL_PATH) -> tuple[nn.Module, Scaler]:
     with torch.serialization.safe_globals([Scaler]):
         checkpoint: dict[str, Any] = torch.load(path, map_location="cpu", weights_only=False)
     scaler: Scaler = checkpoint["scaler"]
-    model = PINNMLP()
+    arch = checkpoint.get("arch", "hard")
+    model: nn.Module = PINNMLP() if arch == "hard" else SoftPINNMLP()
     model.set_output_constraints(scaler)
     model.load_state_dict(checkpoint["model_state"], strict=False)
     model.attach_scaler(scaler)

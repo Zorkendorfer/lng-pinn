@@ -34,11 +34,45 @@ COMP_COLS = ["CH4", "C2H6", "C3H8", "nC4H10", "iC4H10", "N2"]
 
 PROCESSED_DIR = Path("data/processed")
 RESULTS_DIR = Path("results/tables")
+CACHE_TAG: str | None = None
 SEEDS = [42, 0, 1, 7, 13, 19, 23, 31, 37, 53]
 HORIZON_DAYS = 7
 CARGO_CYCLE_HOURS = CARGO_CYCLE_DAYS * 24
 CARGO_AMOUNT = 0.55
 STRATEGIES = ("aware", "lagged", "horizon")
+
+
+def _cache_prefix(prefix: str) -> str:
+    return f"{prefix}_{CACHE_TAG}" if CACHE_TAG else prefix
+
+
+def _carbon_tag(carbon_price: float) -> str:
+    text = f"{carbon_price:g}".replace("-", "m").replace(".", "p")
+    return f"co2{text}"
+
+
+def _normalise_tag_part(text: str) -> str:
+    keep = []
+    for ch in text.lower():
+        keep.append(ch if ch.isalnum() else "_")
+    return "_".join("".join(keep).split("_"))
+
+
+def _surrogate_label(model_path: str, requested: str | None) -> str:
+    if requested:
+        return _normalise_tag_part(requested)
+    default_model_path = Path("results/models/pinn_v1.pt")
+    path = Path(model_path)
+    if path == default_model_path:
+        return "hard"
+    stem = path.stem
+    if stem.startswith("pinn_"):
+        stem = stem[len("pinn_"):]
+    return _normalise_tag_part(stem)
+
+
+def _run_tag(surrogate: str, carbon_price: float) -> str:
+    return f"{_normalise_tag_part(surrogate)}_{_carbon_tag(carbon_price)}"
 
 
 def _safe_replace(src: Path, dst: Path, attempts: int = 20, delay: float = 0.2) -> None:
@@ -61,25 +95,25 @@ def _safe_replace(src: Path, dst: Path, attempts: int = 20, delay: float = 0.2) 
 
 def _seed_result_path(seed: int) -> Path:
     """Final per-seed backtest result (consolidated parquet)."""
-    return PROCESSED_DIR / f"seed_sensitivity_seed{seed}.parquet"
+    return PROCESSED_DIR / f"{_cache_prefix('seed_sensitivity')}_seed{seed}.parquet"
 
 
 def _seed_partial_records_path(seed: int) -> Path:
-    return PROCESSED_DIR / f"seed_sensitivity_partial_seed{seed}.parquet"
+    return PROCESSED_DIR / f"{_cache_prefix('seed_sensitivity_partial')}_seed{seed}.parquet"
 
 
 def _seed_partial_state_path(seed: int) -> Path:
-    return PROCESSED_DIR / f"seed_sensitivity_partial_seed{seed}.json"
+    return PROCESSED_DIR / f"{_cache_prefix('seed_sensitivity_partial')}_seed{seed}.json"
 
 
 def _seed_true_cost_done_path(seed: int, strategy: str) -> Path:
     """Completed per-(seed, strategy) CoolProp true-cost cache."""
-    return PROCESSED_DIR / f"seed_true_costs_seed{seed}_{strategy}.parquet"
+    return PROCESSED_DIR / f"{_cache_prefix('seed_true_costs')}_seed{seed}_{strategy}.parquet"
 
 
 def _seed_true_cost_partial_path(seed: int, strategy: str) -> Path:
     """In-progress per-row true-cost partial, flushed every K completions."""
-    return PROCESSED_DIR / f"seed_true_costs_seed{seed}_{strategy}_inprogress.parquet"
+    return PROCESSED_DIR / f"{_cache_prefix('seed_true_costs')}_seed{seed}_{strategy}_inprogress.parquet"
 
 
 def _flush_true_cost_partial(done: dict[int, float], path: Path) -> None:
@@ -565,6 +599,8 @@ def _process_one_seed(
     ckpt_every: int,
     carbon_price: float,
     inner_workers: int,
+    model_path: str,
+    cache_tag: str,
     slot: int = 0,
     validation_sample_frac: float = 1.0,
 ) -> list[dict]:
@@ -580,12 +616,14 @@ def _process_one_seed(
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+    global CACHE_TAG
+    CACHE_TAG = cache_tag
 
     resume = not no_resume
     pos = slot + 1
 
     from lng_pinn.pinn import load  # lazy torch import — see module-top comment
-    model, scaler = load()
+    model, scaler = load(model_path)
     model.eval()
 
     cached = _load_seed_result(seed) if resume else None
@@ -667,6 +705,16 @@ def main() -> None:
              "whenever this changes value across runs.",
     )
     parser.add_argument(
+        "--model-path",
+        default="results/models/pinn_v1.pt",
+        help="Path to the surrogate checkpoint to evaluate (default: results/models/pinn_v1.pt).",
+    )
+    parser.add_argument(
+        "--surrogate",
+        default=None,
+        help="Optional surrogate label for tagged caches/results (default: hard or model stem).",
+    )
+    parser.add_argument(
         "--workers", type=int, default=1,
         help=(
             "Parallel processes across seeds. Default 1 (serial). Inner CoolProp "
@@ -686,6 +734,10 @@ def main() -> None:
     )
     args = parser.parse_args()
     resume = not args.no_resume
+    surrogate = _surrogate_label(args.model_path, args.surrogate)
+    run_tag = _run_tag(surrogate, args.carbon_price)
+    global CACHE_TAG
+    CACHE_TAG = run_tag
 
     try:
         git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
@@ -697,6 +749,7 @@ def main() -> None:
     inner_workers = max(1, total_cores // n_workers)
     print(
         f"git_sha={git_sha}  seeds={SEEDS}  carbon_price={args.carbon_price:.1f} EUR/tCO2  "
+        f"surrogate={surrogate}  model_path={args.model_path}  cache_tag={run_tag}  "
         f"workers={n_workers} (inner CoolProp pool ≈ {inner_workers} per worker)"
     )
 
@@ -711,7 +764,7 @@ def main() -> None:
                 executor.submit(
                     _process_one_seed,
                     int(seed), args.no_resume, args.ckpt_every, args.carbon_price,
-                    inner_workers, i % n_workers,
+                    inner_workers, args.model_path, run_tag, i % n_workers,
                     args.validation_sample_frac,
                 ): int(seed)
                 for i, seed in enumerate(SEEDS)
@@ -740,7 +793,7 @@ def main() -> None:
     else:
         # Serial path — preserves the in-line per-seed prints and resume messages.
         from lng_pinn.pinn import load  # lazy torch import — see module-top comment
-        model, scaler = load()
+        model, scaler = load(args.model_path)
         model.eval()
 
         for seed in tqdm(SEEDS, desc="Seeds"):
@@ -823,6 +876,8 @@ def main() -> None:
             )
 
     results_df = pd.DataFrame(all_records)
+    results_df["surrogate"] = surrogate
+    results_df["carbon_price_eur_per_t"] = float(args.carbon_price)
 
     # Per-year mean ± std across seeds, for both baselines
     summary_rows = []
@@ -832,13 +887,16 @@ def main() -> None:
         grp["baseline"] = baseline
         summary_rows.append(grp)
     summary = pd.concat(summary_rows, ignore_index=True)
+    summary["surrogate"] = surrogate
+    summary["carbon_price_eur_per_t"] = float(args.carbon_price)
 
     # v1.4 C0 — significance table. The paper's claim is about the *mean*
     # saving across composition seeds, so report SE = std/sqrt(n), the
     # one-sample t-stat against 0, and the two-sided p-value. Both per-year
     # and pooled (each seed's full-period mean saving, n = #seeds) rows are written.
     significance = _build_significance_table(results_df)
-    significance.to_csv(RESULTS_DIR / "seed_significance.csv", index=False)
+    significance["surrogate"] = surrogate
+    significance["carbon_price_eur_per_t"] = float(args.carbon_price)
 
     # Seed-averaged overall saving
     seed_totals = results_df.groupby("seed")["saving_vs_lagged_pct"].mean()
@@ -852,7 +910,18 @@ def main() -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     results_df.to_csv(RESULTS_DIR / "seed_sensitivity.csv", index=False)
     summary.to_csv(RESULTS_DIR / "seed_sensitivity_summary.csv", index=False)
-    print("Saved seed_sensitivity.csv, seed_sensitivity_summary.csv, seed_significance.csv")
+    significance.to_csv(RESULTS_DIR / "seed_significance.csv", index=False)
+    tagged_results = RESULTS_DIR / f"seed_sensitivity_{run_tag}.csv"
+    tagged_summary = RESULTS_DIR / f"seed_sensitivity_summary_{run_tag}.csv"
+    tagged_significance = RESULTS_DIR / f"seed_significance_{run_tag}.csv"
+    results_df.to_csv(tagged_results, index=False)
+    summary.to_csv(tagged_summary, index=False)
+    significance.to_csv(tagged_significance, index=False)
+    print(
+        "Saved seed_sensitivity.csv, seed_sensitivity_summary.csv, seed_significance.csv "
+        f"and tagged copies {tagged_results.name}, {tagged_summary.name}, "
+        f"{tagged_significance.name}"
+    )
 
 
 def _build_significance_table(results_df: pd.DataFrame) -> pd.DataFrame:
