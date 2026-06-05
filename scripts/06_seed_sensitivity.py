@@ -858,9 +858,18 @@ def main() -> None:
 def _build_significance_table(results_df: pd.DataFrame) -> pd.DataFrame:
     """Per-year and pooled one-sample t-tests of aware-vs-baseline saving vs 0.
 
-    The pooled row collapses each seed to its full-period mean saving first, so
-    n = number of seeds and the rows are independent draws over composition
-    realisations — the correct unit for the headline confidence interval.
+    This is the single, auditable home of the five-year pooling (rework plan
+    item 8). Two scopes are reported side by side:
+
+    * Per-year rows (``scope`` = the year): the n = #seeds savings *within* that
+      year. Each year is a distinct price regime, so these are NOT independent
+      draws from one population and per-year p-values should not be combined
+      naively across years (no multiple-comparison correction is applied here).
+    * Pooled row (``scope`` = ``ALL_<k>yr_mean``): each seed is first collapsed
+      to its full-period mean saving, then the test runs over those n = #seeds
+      values. This is the correct unit for the headline confidence interval —
+      it treats composition seeds (not seed-year cells) as the independent
+      draws, avoiding the over-pooled n = seeds*years t-test.
     """
     from scipy import stats
 
