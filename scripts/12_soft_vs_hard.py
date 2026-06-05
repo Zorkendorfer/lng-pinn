@@ -21,8 +21,12 @@ import numpy as np
 import pandas as pd
 
 RESULTS_DIR = Path("results/tables")
-PATTERN = re.compile(r"seed_sensitivity_(?P<surrogate>.+)_co2(?P<co2>m?[0-9]+(?:p[0-9]+)?)\.csv$")
+PATTERN = re.compile(
+    r"seed_sensitivity_(?P<surrogate>.+)_co2(?P<co2>m?[0-9]+(?:p[0-9]+)?)(?P<extra>_.+)?\.csv$"
+)
 BASELINES = ("lagged", "horizon")
+DEFAULT_SURROGATES = ["hard", "soft"]
+DEFAULT_CARBON_PRICES = [0.0, 80.0]
 
 
 def _carbon_from_token(token: str) -> float:
@@ -42,6 +46,7 @@ def _load_tagged_inputs(results_dir: Path) -> pd.DataFrame:
             df["surrogate"] = match.group("surrogate")
         if "carbon_price_eur_per_t" not in df.columns:
             df["carbon_price_eur_per_t"] = _carbon_from_token(match.group("co2"))
+        df["composition_tag"] = (match.group("extra") or "").lstrip("_")
         df["_source_file"] = path.name
         frames.append(df)
 
@@ -109,9 +114,36 @@ def _contrast(summary: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _missing_cells(
+    df: pd.DataFrame,
+    surrogates: list[str],
+    carbon_prices: list[float],
+    composition_tag: str,
+) -> list[str]:
+    missing = []
+    for surrogate in surrogates:
+        for price in carbon_prices:
+            hit = df[
+                (df["surrogate"].astype(str) == surrogate)
+                & np.isclose(df["carbon_price_eur_per_t"].astype(float), float(price))
+                & (df["composition_tag"].astype(str) == composition_tag)
+            ]
+            if hit.empty:
+                missing.append(f"{surrogate} co2={price:g}")
+    return missing
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", default=str(RESULTS_DIR))
+    parser.add_argument("--surrogates", nargs="+", default=DEFAULT_SURROGATES)
+    parser.add_argument("--carbon-prices", type=float, nargs="+", default=DEFAULT_CARBON_PRICES)
+    parser.add_argument(
+        "--composition-tag",
+        default="",
+        help="Optional suffix tag after the carbon token; default empty = synthetic runs only.",
+    )
+    parser.add_argument("--strict", action="store_true")
     parser.add_argument("--out", default=str(RESULTS_DIR / "soft_vs_hard.csv"))
     parser.add_argument(
         "--contrast-out",
@@ -121,6 +153,22 @@ def main() -> None:
 
     results_dir = Path(args.results_dir)
     df = _load_tagged_inputs(results_dir)
+    wanted_surrogates = [str(s) for s in args.surrogates]
+    wanted_prices = [float(p) for p in args.carbon_prices]
+    missing = _missing_cells(df, wanted_surrogates, wanted_prices, str(args.composition_tag))
+    if missing:
+        print("Missing soft-vs-hard cells:")
+        for item in missing:
+            print(f"  {item}")
+        if args.strict:
+            raise SystemExit(2)
+    df = df[
+        df["surrogate"].astype(str).isin(wanted_surrogates)
+        & df["carbon_price_eur_per_t"].astype(float).isin(wanted_prices)
+        & (df["composition_tag"].astype(str) == str(args.composition_tag))
+    ]
+    if df.empty:
+        raise SystemExit("No rows matched the requested surrogates/carbon prices.")
     summary = _summarise(df)
     contrast = _contrast(summary)
 

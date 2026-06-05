@@ -26,7 +26,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 # paging file when many workers run at once. torch-dependent imports
 # (baseline/dispatch/pinn) are therefore done lazily inside the functions that
 # actually run dispatch — see _run_backtest / _process_one_seed / main.
-from lng_pinn.composition import CARGO_CYCLE_DAYS, build_composition_series
+from lng_pinn.composition import (
+    BLEND_DAYS,
+    CARGO_CYCLE_DAYS,
+    build_composition_series,
+    build_composition_series_from_csv,
+)
 
 # Defined locally (instead of imported from baseline) to keep this module's
 # top-level import graph torch-free for the CoolProp workers.
@@ -71,8 +76,11 @@ def _surrogate_label(model_path: str, requested: str | None) -> str:
     return _normalise_tag_part(stem)
 
 
-def _run_tag(surrogate: str, carbon_price: float) -> str:
-    return f"{_normalise_tag_part(surrogate)}_{_carbon_tag(carbon_price)}"
+def _run_tag(surrogate: str, carbon_price: float, composition_label: str | None = None) -> str:
+    parts = [_normalise_tag_part(surrogate), _carbon_tag(carbon_price)]
+    if composition_label:
+        parts.append(_normalise_tag_part(composition_label))
+    return "_".join(parts)
 
 
 def _safe_replace(src: Path, dst: Path, attempts: int = 20, delay: float = 0.2) -> None:
@@ -192,42 +200,107 @@ def _stable_int_hash(text: str) -> int:
 _VALIDATION_COLS = [
     "script",
     "carbon_price_eur_per_t",
+    "surrogate",
+    "run_tag",
     "seed",
     "strategy",
     "n_total",
     "n_sampled",
     "mean_rel_err",
+    "mean_signed_rel_err",
     "median_abs_rel_err",
     "p95_abs_rel_err",
     "max_abs_rel_err",
+    "corr_err_ch4",
+    "corr_err_n2",
+    "mean_err_low_ch4",
+    "mean_err_high_ch4",
+    "delta_err_high_minus_low_ch4",
+    "mean_err_low_n2",
+    "mean_err_high_n2",
+    "delta_err_high_minus_low_n2",
 ]
+
+
+def _corr_or_nan(x: np.ndarray, y: np.ndarray) -> float:
+    if x.size < 2 or np.std(x) <= 0.0 or np.std(y) <= 0.0:
+        return float("nan")
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def _tail_delta(values: np.ndarray, driver: np.ndarray) -> tuple[float, float, float]:
+    if values.size == 0:
+        return (float("nan"), float("nan"), float("nan"))
+    med = float(np.median(driver))
+    low = values[driver <= med]
+    high = values[driver > med]
+    low_mean = float(np.mean(low)) if low.size else float("nan")
+    high_mean = float(np.mean(high)) if high.size else float("nan")
+    return (low_mean, high_mean, high_mean - low_mean)
+
+
+def _composition_error_stats(sample: pd.DataFrame, rel_err: np.ndarray) -> dict[str, float]:
+    """Composition-correlated surrogate error diagnostics for rework item 7."""
+    if rel_err.size == 0:
+        return {
+            "corr_err_ch4": float("nan"),
+            "corr_err_n2": float("nan"),
+            "mean_err_low_ch4": float("nan"),
+            "mean_err_high_ch4": float("nan"),
+            "delta_err_high_minus_low_ch4": float("nan"),
+            "mean_err_low_n2": float("nan"),
+            "mean_err_high_n2": float("nan"),
+            "delta_err_high_minus_low_n2": float("nan"),
+        }
+    ch4 = sample["CH4"].to_numpy(dtype=float)
+    n2 = sample["N2"].to_numpy(dtype=float)
+    ch4_low, ch4_high, ch4_delta = _tail_delta(rel_err, ch4)
+    n2_low, n2_high, n2_delta = _tail_delta(rel_err, n2)
+    return {
+        "corr_err_ch4": _corr_or_nan(rel_err, ch4),
+        "corr_err_n2": _corr_or_nan(rel_err, n2),
+        "mean_err_low_ch4": ch4_low,
+        "mean_err_high_ch4": ch4_high,
+        "delta_err_high_minus_low_ch4": ch4_delta,
+        "mean_err_low_n2": n2_low,
+        "mean_err_high_n2": n2_high,
+        "delta_err_high_minus_low_n2": n2_delta,
+    }
 
 
 def _append_validation_diagnostics(
     *,
+    surrogate: str,
+    run_tag: str,
     seed: int,
     strategy: str,
     carbon_price: float,
     rel_err: np.ndarray,
+    sample: pd.DataFrame,
     n_total: int,
     n_sampled: int,
 ) -> None:
     """Append a one-row PINN-vs-CoolProp validation summary."""
     if rel_err.size == 0:
         return
-    path = RESULTS_DIR / "phase2_validation.csv"
+    path = RESULTS_DIR / "phase2_validation_composition.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
+    comp_stats = _composition_error_stats(sample, rel_err)
     row = pd.DataFrame([{
         "script": "06_seed_sensitivity",
         "carbon_price_eur_per_t": carbon_price,
+        "surrogate": surrogate,
+        "run_tag": run_tag,
         "seed": seed,
         "strategy": strategy,
         "n_total": int(n_total),
         "n_sampled": int(n_sampled),
         "mean_rel_err": float(np.mean(rel_err)),
+        "mean_signed_rel_err": float(np.mean(rel_err)),
         "median_abs_rel_err": float(np.median(np.abs(rel_err))),
         "p95_abs_rel_err": float(np.quantile(np.abs(rel_err), 0.95)),
         "max_abs_rel_err": float(np.max(np.abs(rel_err))),
+        **comp_stats,
     }])[_VALIDATION_COLS]
     header = not path.exists()
     row.to_csv(path, mode="a", index=False, header=header)
@@ -239,6 +312,8 @@ def _eval_true_cost_for_seed_strategy(
     seed: int,
     strategy: str,
     carbon_price: float,
+    surrogate: str,
+    run_tag: str,
     resume: bool = True,
     ckpt_every: int = 2000,
     n_workers: int | None = None,
@@ -254,7 +329,8 @@ def _eval_true_cost_for_seed_strategy(
     v1.5 E2: when ``validation_sample_frac < 1.0``, only that fraction
     of rows is evaluated through CoolProp; the rest use the PINN's predicted
     cost from ``dispatch_df.cost_eur``. Per-call validation rel-err
-    diagnostics are appended to ``results/tables/phase2_validation.csv``.
+    composition-correlated diagnostics are appended to
+    ``results/tables/phase2_validation_composition.csv``.
     """
     from lng_pinn.thermo import co2_per_kg_fuel
 
@@ -368,21 +444,37 @@ def _eval_true_cost_for_seed_strategy(
         sample_pinn = pinn_cost_arr[sample_indices]
         denom = np.abs(sample_pinn) + 1e-12
         rel_err = (sample_true - sample_pinn) / denom
-        rel_err = rel_err[np.isfinite(rel_err)]
+        finite = np.isfinite(rel_err)
+        rel_err = rel_err[finite]
+        sample = joined.iloc[sample_indices].iloc[finite]
         _append_validation_diagnostics(
-            seed=seed, strategy=strategy, carbon_price=carbon_price,
-            rel_err=rel_err, n_total=n, n_sampled=int(sample_mask.sum()),
+            surrogate=surrogate,
+            run_tag=run_tag,
+            seed=seed,
+            strategy=strategy,
+            carbon_price=carbon_price,
+            rel_err=rel_err,
+            sample=sample,
+            n_total=n,
+            n_sampled=int(sample_mask.sum()),
         )
 
     out = [done.get(i, np.nan) for i in range(n)]
     return pd.Series(out, index=joined.index, name="true_cost_eur")
 
 
-def _ts_for_seed(seed: int) -> pd.DataFrame:
+def _ts_for_seed(
+    seed: int,
+    composition_csv: str | None = None,
+    blend_days: float = BLEND_DAYS,
+) -> pd.DataFrame:
     """Swap composition columns in the cached timeseries for the given seed."""
     ts = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
     ts.index = pd.to_datetime(ts.index, utc=True)
-    comp = build_composition_series(ts.index, seed=seed)
+    if composition_csv:
+        comp = build_composition_series_from_csv(ts.index, composition_csv, blend_days=blend_days)
+    else:
+        comp = build_composition_series(ts.index, seed=seed)
     for col in COMP_COLS:
         ts[col] = comp[col]
     return ts
@@ -600,7 +692,10 @@ def _process_one_seed(
     carbon_price: float,
     inner_workers: int,
     model_path: str,
+    surrogate: str,
     cache_tag: str,
+    composition_csv: str | None,
+    blend_days: float,
     slot: int = 0,
     validation_sample_frac: float = 1.0,
 ) -> list[dict]:
@@ -629,9 +724,9 @@ def _process_one_seed(
     cached = _load_seed_result(seed) if resume else None
     if cached is not None:
         aware_df, lagged_df, horizon_df = cached
-        ts = _ts_for_seed(seed)
+        ts = _ts_for_seed(seed, composition_csv=composition_csv, blend_days=blend_days)
     else:
-        ts = _ts_for_seed(seed)
+        ts = _ts_for_seed(seed, composition_csv=composition_csv, blend_days=blend_days)
         aware_df, lagged_df, horizon_df = _run_backtest(
             ts, model, scaler, seed=seed, resume=resume, ckpt_every=ckpt_every,
             carbon_price_eur_per_t=carbon_price, tqdm_position=pos,
@@ -651,7 +746,7 @@ def _process_one_seed(
             true_costs[s] = cached_tc["true_cost_eur"]
         else:
             true_costs[s] = _eval_true_cost_for_seed_strategy(
-                df, ts, seed, s, carbon_price, resume=resume,
+                df, ts, seed, s, carbon_price, surrogate, cache_tag, resume=resume,
                 n_workers=inner_workers, tqdm_position=pos,
                 validation_sample_frac=validation_sample_frac,
             )
@@ -715,6 +810,27 @@ def main() -> None:
         help="Optional surrogate label for tagged caches/results (default: hard or model stem).",
     )
     parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=SEEDS,
+        help="Composition seeds to run for synthetic cargo schedules.",
+    )
+    parser.add_argument(
+        "--composition-csv",
+        default=None,
+        help=(
+            "Optional exogenous cargo-arrival/composition CSV. Uses the same CSV "
+            "for every requested seed and tags caches/results by file stem."
+        ),
+    )
+    parser.add_argument(
+        "--blend-days",
+        type=float,
+        default=BLEND_DAYS,
+        help="Blend period for --composition-csv transitions (default: 5 days).",
+    )
+    parser.add_argument(
         "--workers", type=int, default=1,
         help=(
             "Parallel processes across seeds. Default 1 (serial). Inner CoolProp "
@@ -728,14 +844,18 @@ def main() -> None:
             "v1.5 E2: fraction of Phase-2 rows to evaluate through CoolProp "
             "(default 1.0 = full ground-truth re-eval). At 0.05 the remaining "
             "95%% of rows use the PINN's predicted cost (matches CoolProp to "
-            "~1e-7 rel err per v1.4); validation rel-err stats are logged to "
-            "results/tables/phase2_validation.csv."
+            "~1e-7 rel err per v1.4); composition-correlated validation stats "
+            "are logged to results/tables/phase2_validation_composition.csv."
         ),
     )
     args = parser.parse_args()
     resume = not args.no_resume
     surrogate = _surrogate_label(args.model_path, args.surrogate)
-    run_tag = _run_tag(surrogate, args.carbon_price)
+    seeds = [int(s) for s in args.seeds]
+    composition_label = (
+        f"cargo_{Path(args.composition_csv).stem}" if args.composition_csv else None
+    )
+    run_tag = _run_tag(surrogate, args.carbon_price, composition_label)
     global CACHE_TAG
     CACHE_TAG = run_tag
 
@@ -745,11 +865,12 @@ def main() -> None:
         git_sha = "unknown"
 
     total_cores = max(1, os.cpu_count() or 1)
-    n_workers = max(1, min(args.workers, len(SEEDS)))
+    n_workers = max(1, min(args.workers, len(seeds)))
     inner_workers = max(1, total_cores // n_workers)
     print(
-        f"git_sha={git_sha}  seeds={SEEDS}  carbon_price={args.carbon_price:.1f} EUR/tCO2  "
+        f"git_sha={git_sha}  seeds={seeds}  carbon_price={args.carbon_price:.1f} EUR/tCO2  "
         f"surrogate={surrogate}  model_path={args.model_path}  cache_tag={run_tag}  "
+        f"composition_csv={args.composition_csv or 'synthetic'}  "
         f"workers={n_workers} (inner CoolProp pool ≈ {inner_workers} per worker)"
     )
 
@@ -764,10 +885,11 @@ def main() -> None:
                 executor.submit(
                     _process_one_seed,
                     int(seed), args.no_resume, args.ckpt_every, args.carbon_price,
-                    inner_workers, args.model_path, run_tag, i % n_workers,
+                    inner_workers, args.model_path, surrogate, run_tag,
+                    args.composition_csv, args.blend_days, i % n_workers,
                     args.validation_sample_frac,
                 ): int(seed)
-                for i, seed in enumerate(SEEDS)
+                for i, seed in enumerate(seeds)
             }
             for future in tqdm(
                 as_completed(futures), total=len(futures),
@@ -796,15 +918,23 @@ def main() -> None:
         model, scaler = load(args.model_path)
         model.eval()
 
-        for seed in tqdm(SEEDS, desc="Seeds"):
+        for seed in tqdm(seeds, desc="Seeds"):
             # ----- Phase 1: dispatch backtest -----------------------------------
             cached = _load_seed_result(seed) if resume else None
             if cached is not None:
                 aware_df, lagged_df, horizon_df = cached
                 print(f"  seed={seed}: reusing cached backtest result")
-                ts = _ts_for_seed(seed)
+                ts = _ts_for_seed(
+                    seed,
+                    composition_csv=args.composition_csv,
+                    blend_days=args.blend_days,
+                )
             else:
-                ts = _ts_for_seed(seed)
+                ts = _ts_for_seed(
+                    seed,
+                    composition_csv=args.composition_csv,
+                    blend_days=args.blend_days,
+                )
                 aware_df, lagged_df, horizon_df = _run_backtest(
                     ts, model, scaler, seed=seed, resume=resume,
                     ckpt_every=args.ckpt_every,
@@ -828,7 +958,7 @@ def main() -> None:
                     true_costs[s] = cached_tc["true_cost_eur"]
                 else:
                     true_costs[s] = _eval_true_cost_for_seed_strategy(
-                        df, ts, seed, s, args.carbon_price, resume=resume,
+                        df, ts, seed, s, args.carbon_price, surrogate, run_tag, resume=resume,
                         validation_sample_frac=args.validation_sample_frac,
                     )
                     done_path.parent.mkdir(parents=True, exist_ok=True)
@@ -902,7 +1032,7 @@ def main() -> None:
     seed_totals = results_df.groupby("seed")["saving_vs_lagged_pct"].mean()
     overall_mean = float(seed_totals.mean())
     overall_std = float(seed_totals.std())
-    n = len(SEEDS)
+    n = len(seeds)
     print(f"\nOverall saving vs lagged:  {overall_mean:.2f}% ± {overall_std:.2f}%  (n={n} seeds)")
     h_totals = results_df.groupby("seed")["saving_vs_horizon_pct"].mean()
     print(f"Overall saving vs horizon: {h_totals.mean():.2f}% ± {h_totals.std():.2f}%")
