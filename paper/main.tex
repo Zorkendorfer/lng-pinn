@@ -46,24 +46,24 @@
 
 % =========================================================================
 \begin{abstract}
-% TARGET 150 WORDS. Edit; numbers are load-bearing and should match the
-% latest seed_significance.csv and carbon_sweep.csv.
-We present a physics-by-construction neural surrogate of FSRU regasification
-in which the energy balance and pump-work relations hold \emph{exactly}, and
-couple it to day-ahead electricity prices and an EU-ETS-style carbon cost in a
-rolling-horizon dispatch optimisation.
-On the Independence FSRU (Klaip\.eda, Lithuania) over 2021--2025 we show
-that composition-aware dispatch saves
-\textbf{$+2.50\%$ ($95\%$~CI $[+2.01, +2.98]$, $p=3.5\times10^{-6}$,
-$n=10$ seeds)} over a realistic lagged-composition baseline at the reference
-EU ETS price of \SI{80}{\EUR\per\tCOtwo}. Without carbon pricing the saving
-collapses to zero. We further show that earlier soft-physics surrogates
-produced spurious $4$--$7\%$ composition savings that vanish under hard
-physics, suggesting a methodological pitfall relevant beyond LNG
-regasification. The surrogate matches the CoolProp ground truth to a median
-absolute relative cost error of $1.5\times10^{-7}$ on the dispatch trajectory
-and runs approximately $1.1\times 10^4$ times faster than serial CoolProp HEOS
-on a repeated 10,000-point benchmark.
+A learned surrogate placed inside a decision optimiser can manufacture the very
+signal it is used to detect. We study this risk in composition-aware dispatch
+of the Klaip\.eda Independence FSRU under day-ahead prices and an effective
+carbon price on delivered gas. The surrogate is physics-by-construction: the
+modeled mass balance, steady-state energy balance, and analytical pump-work
+relation hold exactly, while the neural network predicts only the genuinely
+nonlinear unknowns. Under the default linear tank-mixing model, the
+composition-aware strategy saves \textbf{$+2.50\%$} relative to a
+lagged-composition baseline at the reference value
+\SI{80}{\EUR\per\tCOtwo} ($95\%$~CI $[+2.01,+2.98]$,
+$p=3.5\times10^{-6}$, $n=10$ synthetic cargo-schedule seeds), and the saving
+is indistinguishable from zero at zero carbon price. This estimate is
+conditional on the assumed tank-mixing dynamics and on the synthetic cargo
+generator. We further show, in a controlled soft-vs-hard surrogate comparison,
+that aggregate prediction accuracy is not sufficient for decision fidelity:
+composition-dependent residual structure can create a spurious downstream
+saving signal. The diagnostic motivates the hard-constrained architecture used
+for the headline dispatch results.
 \end{abstract}
 
 % =========================================================================
@@ -89,8 +89,8 @@ on a repeated 10,000-point benchmark.
 %    The standard soft-physics training recipe (data MSE + soft residual
 %    penalty) is prone to a particular failure mode that this paper
 %    explicitly characterises: the surrogate noise contaminates the
-%    composition signal and fabricates apparent savings that vanish under
-%    a stricter surrogate.
+%    composition signal and can create apparent savings that vanish under
+%    stricter surrogate checks.
 %
 % Contributions to highlight:
 % (i) A physics-by-construction surrogate architecture for FSRU regasification
@@ -98,7 +98,7 @@ on a repeated 10,000-point benchmark.
 %     formula are satisfied identically (not via soft losses).
 % (ii) A formal characterisation of when composition-aware dispatch pays
 %     off, parametric in the carbon price.
-% (iii) A methodological warning about soft-physics surrogates fabricating
+% (iii) A methodological warning about soft-physics surrogates creating
 %     apparent savings.
 % (iv) A reproducible 10-seed sensitivity protocol that produces a tight
 %     confidence interval on the headline saving.
@@ -134,44 +134,51 @@ typically made on price alone. Whether composition information is
 question that this paper answers.
 
 Answering it requires evaluating the regasification thermodynamics inside
-the inner loop of a dispatch optimiser, thousands of times over a
-multi-year backtest. A high-fidelity equation-of-state simulator such as
-CoolProp \citep{bell2014pure,huber2022refprop} is too slow for repeated use inside the
-optimisation loop, which motivates a learned surrogate. Hybrid first-principles
-plus neural process models have a long history \citep{psichogios1992hybrid},
-and modern scientific machine learning frames this as the integration of
-mechanistic constraints with data-driven approximation
-\citep{karpatne2017theory_guided,karniadakis2021piml,willard2022scientific_ml}.
-The approach differs
-from classical PINNs in that physical constraints are embedded in the
-architecture rather than enforced through PDE-residual terms; it is a
-physics-by-construction surrogate within the broader SciML framework. This
-distinction matters operationally: the standard soft-physics recipe---data-fit
-loss plus soft penalty terms for the governing balances---turns out to be
-actively dangerous in this setting. We show that a soft-physics surrogate
-leaves residual, composition-dependent biases that a downstream optimiser
-misreads as a real signal, fabricating apparent composition savings of
-$4$--$7\%$ that vanish entirely when the physics is made exact. This is a
-general hazard for any pipeline that uses a learned surrogate to compare
-decisions querying different regions of the input space, and we believe it is
-under-appreciated.
+the inner loop of a dispatch optimiser, thousands of times over a multi-year
+backtest. A high-fidelity equation-of-state simulator such as CoolProp
+\citep{bell2014pure,huber2022refprop} is too slow for repeated use in the loop,
+which motivates a learned surrogate. Embedding physical constraints in such
+surrogates is well studied: the hard-versus-soft distinction is established
+\citep{krishnapriyan2021characterizing,chalapathi2024moe}, and hard equality
+constraints have been imposed on chemical-process surrogates by projection
+\citep{chen2024kkt}, building on a long line of hybrid first-principles/neural
+models \citep{psichogios1992hybrid,lagaris1998ann_pde}. That literature argues the
+case on \emph{prediction} grounds---accuracy, convergence, constraint
+satisfaction. Our point is different and, we believe, under-appreciated: it is a
+\emph{decision} hazard. A soft-physics surrogate can leave a residual,
+composition-dependent bias that is negligible in aggregate fidelity yet becomes a
+systematic differential cost between two compared dispatch strategies, because the
+strategies query the input space asymmetrically---one at a time-varying
+composition, the other at a fixed one. A downstream optimiser can then read that
+differential as a real signal. The controlled soft-vs-hard pipeline in this paper
+is designed to test for exactly that hazard before the surrogate is trusted in a
+decision loop; the hard architecture ties the cost-determining channel to exact
+thermodynamics by construction.
 
-This paper makes four contributions. (i) We introduce a
-\emph{physics-by-construction} surrogate architecture for FSRU regasification in
-which mass balance, the steady-state energy balance, and the analytical
-pump-work relation hold \emph{identically}, not through soft penalties; the
-network predicts only the genuinely nonlinear unknowns. (ii) Using this
-surrogate we characterise, parametrically in the carbon price, when
-composition-aware dispatch pays off, and find that the benefit is created by
-carbon pricing: at the reference EU ETS level of \SI{80}{\EUR\per\tCOtwo} it
-is \textbf{$+2.50\%$} versus a realistic lagged-composition baseline
-($95\%$~CI $[+2.01, +2.98]$, $p=3.5\times10^{-6}$, ten cargo-schedule seeds), and
-at zero carbon price it is statistically indistinguishable from zero.
-(iii) We document the soft-physics fabrication hazard above as a
-methodological warning and contribution in its own right: soft constraints can
-fabricate optimisation signals at exactly the scale being claimed. (iv) We provide a reproducible ten-seed sensitivity
-protocol that absorbs cargo-schedule variance and reports the headline
-saving as a confidence interval on the seed mean rather than a single
+This paper makes four contributions. (i)~We identify a
+\emph{decision-quality} failure mode of surrogate-in-the-loop optimisation: a
+sub-percent, composition-dependent surrogate bias can create a downstream
+optimisation signal at the scale of the effect under study, because the compared
+decisions query the input space asymmetrically. We implement a controlled
+soft-vs-hard comparison and provide a cheap pre-deployment diagnostic that flags
+the hazard before an optimiser is trusted. This is distinct from the prediction-accuracy arguments
+that motivate existing hard-constraint methods
+\citep{krishnapriyan2021characterizing,chen2024kkt}, and it generalises beyond LNG.
+(ii)~As the remedy we operationalise a \emph{physics-by-construction} surrogate for
+FSRU regasification---mass balance, the steady-state energy balance, and the
+analytical pump-work relation hold \emph{identically}, with the network predicting
+only the genuinely nonlinear unknowns, so the cost-determining channel inherits
+exact thermodynamics and depends on the network through a single bounded scalar.
+(iii)~Using it as a case study we characterise, \emph{parametrically in the
+effective carbon price}, when composition-aware dispatch pays off: the benefit is
+created by carbon pricing, rising from indistinguishable-from-zero at zero carbon
+to \textbf{$+2.50\%$} versus a realistic lagged-composition baseline
+($95\%$~CI $[+2.01, +2.98]$, $p=3.5\times10^{-6}$, ten cargo-schedule seeds) at the
+reference value \SI{80}{\EUR\per\tCOtwo}, and is regime-conditional---absent in the 2022 crisis year. We
+report the saving as a curve over carbon price rather than a single point, so a
+reader can locate their own incidence regime. (iv)~We release a reproducible
+ten-seed sensitivity protocol and full pipeline that absorbs cargo-schedule
+variance and reports the seed-mean confidence interval rather than a single
 fragile point estimate.
 
 % =========================================================================
@@ -282,8 +289,8 @@ the surrogate, and $\phi_{\text{CO}_2}(x_t)$ the per-kilogram CO$_2$ emission
 factor from combustion stoichiometry (\cref{sec:mechanism}). The carbon term
 is what couples cost to composition independently of the thermodynamics: two
 cargoes with near-identical $W_{\text{total}}$ can differ in
-$\phi_{\text{CO}_2}$, and at EU ETS prices that difference is large in
-absolute euros. Which carbon-pricing regime makes this a cost the dispatching
+$\phi_{\text{CO}_2}$, and at sufficiently high effective carbon prices that
+difference can be large in absolute euros. Which carbon-pricing regime makes this a cost the dispatching
 agent actually internalises---it is \emph{not} the literal present-day EU~ETS
 bill of a standalone regasification terminal---is a question we address in
 \cref{sec:mechanism}.
@@ -346,8 +353,8 @@ make and it propagates directly into the cost the optimiser sees.
 % --- DRAFT ---
 % The standard PINN recipe trains a network to predict all output
 % channels jointly, with soft penalty terms enforcing energy and mass
-% balance. We show in \cref{sec:methodological-warning} that this
-% architecture fabricates composition-saving artefacts. Our architecture
+% balance. We use \cref{sec:methodological-warning} to test whether this
+% architecture creates composition-saving artefacts. Our architecture
 % predicts only the \emph{minimal set of nonlinear unknowns}; all other
 % outputs are derived in closed form.
 %
@@ -368,10 +375,10 @@ make and it propagates directly into the cost the optimiser sees.
 % T_out endpoints. The remaining duty Q_{duty} = \Delta h - w_{pump} is
 % then split via \alpha:
 \begin{align}
-  Q_{trim} &= \alpha \cdot Q_{duty} \quad\text{(trim heater)} \\
-  Q_{sw}   &= (1 - \alpha) \cdot Q_{duty} \quad\text{(seawater ORV)} \\
-  W_{trim} &= Q_{trim} / \eta_{trim} \\
-  W_{total} &= w_{pump} + W_{trim}.
+  q_{\text{trim}} &= \alpha \cdot q_{\text{duty}} \quad\text{(trim heater)} \\
+  q_{\text{sw}}   &= (1 - \alpha) \cdot q_{\text{duty}} \quad\text{(seawater ORV)} \\
+  w_{\text{trim}} &= q_{\text{trim}} / \eta_{\text{trim}} \\
+  W_{\text{total}} &= w_{\text{pump}} + w_{\text{trim}}.
 \end{align}
 % By construction: (i) mass balance and energy balance both hold
 % identically; (ii) pump work is exactly the analytical formula; (iii)
@@ -399,9 +406,10 @@ enforces the governing balances through soft penalty terms in the loss
 \citep{raissi2019physics,wang2021understanding}. Constraint-satisfying neural
 forms and hybrid first-principles/neural models predate modern PINNs
 \citep{lagaris1998ann_pde,psichogios1992hybrid}; our contribution is to make
-those hard constraints operational inside a downstream dispatch optimiser. We show in
-\cref{sec:methodological-warning} that this is precisely what fabricates
-spurious composition savings here, and we avoid it. Our architecture
+those hard constraints operational inside a downstream dispatch optimiser.
+\Cref{sec:methodological-warning} shows how the released diagnostic tests whether
+this structure creates spurious composition savings, and the hard architecture
+avoids that risk by construction. Our architecture
 predicts only the \emph{minimal set of genuinely nonlinear unknowns} and
 derives everything else in closed form. The network is a residual MLP that
 maps the nine-dimensional input
@@ -410,21 +418,35 @@ normalised send-out temperature $T_{\text{out}}$; a logit whose sigmoid
 $\alpha \in (0,1)$ is the fraction of vaporiser duty supplied by the trim
 heater; and a diagnostic exergy-destruction estimate.
 
-Everything cost-relevant is then closed-form. Pump work is the analytical
-incompressible-liquid value
-$w_{\text{pump}} = (P_{\text{out}}-P_{\text{in}})/(\rho_{\text{in}}\,\eta_{\text{pump}}(\dot m))$
+Everything cost-relevant is then closed-form. Lowercase $q$ and $w$ denote
+specific energies in \si{\kilo\watt\hour\per\kilo\gram}; the retained code
+channel name $W_{\text{total}}$ is also a specific electrical energy. Pump work
+is the analytical incompressible-liquid value
+\begin{equation}
+w_{\text{pump}} =
+\frac{P_{\text{out}}-P_{\text{in}}}
+{\rho_{\text{in}}\eta_{\text{pump}}(\dot m)}
+\cdot \frac{1}{3.6\times 10^6}
+\quad [\mathrm{kWh/kg}],
+\end{equation}
 with the saturated-liquid density $\rho_{\text{in}}$ from CoolProp; the total
 enthalpy rise $\Delta h = h_{\text{out}}(x) - h_{\text{in}}(x)$ is likewise
 read from CoolProp at the fixed pressure/temperature endpoints; and the
-residual duty $Q_{\text{duty}} = \Delta h - w_{\text{pump}}$ is split by
+specific residual duty $q_{\text{duty}} = \Delta h - w_{\text{pump}}$ is split by
 $\alpha$ as in the equations above. Three properties therefore hold
-\emph{by construction rather than approximately}: mass and energy balance are
-exact; pump work is exactly the analytical formula; and the seawater duty
-$Q_{\text{sw}} = (1-\alpha)Q_{\text{duty}}$ is non-negative because the
+\emph{by construction rather than approximately}: the modeled mass balance
+\begin{equation}
+\dot m_{\mathrm{out}} = \dot m_{\mathrm{in}} = \dot m
+\end{equation}
+and steady-state energy balance are exact; pump work is exactly the analytical
+formula; and the seawater duty
+$q_{\text{sw}} = (1-\alpha)q_{\text{duty}}$ is non-negative because the
 sigmoid bounds $\alpha \le 1$. The only quantities the network can get wrong
 are $T_{\text{out}}$, $\alpha$, and the exergy diagnostic; the
 cost-determining $W_{\text{total}}$ inherits the exact pump term and depends
 on the network only through the scalar $\alpha$.
+Boil-off gas, fuel-gas consumption, venting, and auxiliary losses are outside
+this modeled mass balance and are not represented as separate streams.
 
 The loss combines a Kendall multi-task term with learnable per-channel
 log-variances \citep{kendall2018multi}---which removes the need to
@@ -479,6 +501,13 @@ meaningful question---\emph{does knowing today's composition, rather than
 last cargo's, change the optimal schedule?}---so it carries the headline
 number; the others bound the result from above and below.
 
+All reported costs are ex-post realised costs. The aware and lagged strategies
+differ only in the composition information supplied to the optimiser when
+choosing $\dot m_t$; after the schedules are fixed, both are evaluated against
+the same realised hourly composition, weather, prices, and carbon price. Thus
+the reported saving is a realised dispatch-performance difference, not a
+difference between two internally assumed cost models.
+
 \subsection{Seed sensitivity protocol}
 \label{sec:seed-protocol}
 % --- DRAFT ---
@@ -492,9 +521,9 @@ number; the others bound the result from above and below.
 % schedule variance from the headline number; we report the seed-mean
 % with its 95\% confidence interval, not the single-seed value, as the
 % load-bearing claim. The single-seed dispatch trajectory (seed 42, the
-% default) is what the per-year carbon-sweep figures (\cref{fig:6_per_year_block})
+% default) is what the per-year carbon-sweep companion figures
 % trace, with the seed-mean overlay shown as a red error-bar marker at
-% the EU ETS price.
+% the reference carbon value.
 
 Because the cargo trajectory is seed-dependent, any single backtest is one
 draw from a distribution over cargo schedules, and reporting a single run
@@ -508,9 +537,13 @@ null hypothesis that the mean saving is zero. The seed mean, with its
 $95\%$ confidence interval, is the load-bearing claim of the paper; the
 single-seed value is not. The default seed (42) is the one traced by the
 per-year carbon-sweep figures of \cref{sec:per-year}, with the ten-seed mean
-overlaid as an error-bar marker at the EU ETS price so the reader can see
+overlaid as an error-bar marker at the \SI{80}{\EUR\per\tCOtwo} reference value so the reader can see
 where that particular realisation falls within the cargo-schedule
 distribution.
+The p-values quantify uncertainty over the synthetic cargo-schedule generator
+only. They should not be read as full real-world uncertainty intervals, because
+price, demand, weather, plant, and property-model uncertainties are not
+propagated.
 
 % =========================================================================
 \section{Data}
@@ -605,9 +638,9 @@ $1.54\times10^{-7}$, the 95th percentile is $2.59\times10^{-6}$, and the
 maximum is $9.27\times10^{-5}$. This validates the chain from Reality to
 CoolProp to surrogate; direct validation against plant operating data remains
 future work. The near-exact on-trajectory agreement is what licenses using the
-surrogate to compare strategies that differ by only a few percent in cost---and,
-as \cref{sec:methodological-warning} argues, is exactly what a soft-physics
-surrogate fails to deliver.
+surrogate to compare strategies that differ by only a few percent in cost, and it
+motivates the soft-vs-hard decision-fidelity diagnostic in
+\cref{sec:methodological-warning}.
 
 The speed benchmark is what makes the surrogate useful inside the rolling
 optimiser. On 10,000 sampled operating points, repeated batched surrogate
@@ -669,14 +702,14 @@ called as a serial property simulator.
 % that motivates the rest of this section.
 
 The central finding is summarised in \cref{fig:6_main} and quantified in
-\cref{tab:seed-significance}. At the reference EU ETS price of
+\cref{tab:seed-significance}. At the reference value of
 \SI{80}{\EUR\per\tCOtwo}, composition-aware dispatch saves
 $\mathbf{+2.50\%}$ over the realistic lagged-composition baseline when each
 seed's five-year mean saving is computed first
 ($95\%$~CI $[+2.01, +2.98]$, $t=10.03$, $p=3.5\times10^{-6}$, $n=10$ seeds).
 The effect is created by carbon pricing: Panel A of \cref{fig:6_main} shows
 the aware-versus-lagged saving rising from essentially zero at
-$p^{\text{co2}}=0$ to its EU-ETS-level value and then plateauing, so the
+$p^{\text{co2}}=0$ to the reference range and then plateauing, so the
 benefit is monotone in the carbon price over the policy-relevant range.
 Without a carbon price, knowing the composition buys nothing the optimiser
 can act on.
@@ -684,8 +717,9 @@ can act on.
 Panel B isolates a second, separable finding via the constant-flow baseline:
 the value of \emph{temporal} flow-shaping collapses from approximately $+20\%$ at zero
 carbon to approximately $+1\%$ at any positive carbon price. The reason is that once
-emissions are priced they dominate the bill and the fixed-demand constraint
-pins total throughput, leaving little room to arbitrage flow across hours.
+emissions are priced they dominate the bill; the fixed-demand constraint then
+makes total delivered volume nearly common across schedules, leaving little room
+for flow-timing arbitrage to move the percentage saving.
 This is what makes composition the operative lever under carbon pricing
 rather than price-timing---a point we develop in \cref{sec:mechanism}.
 
@@ -710,8 +744,8 @@ regime-specific null and return to its mechanism in \cref{sec:2022}.
     the temporally optimised strategy over a constant-flow baseline, i.e. the
     value of temporal load-shifting. At zero carbon the lever yields
     approximately $+20\%$; at any positive carbon price it collapses to
-    approximately $+1\%$ because emissions pin the optimal
-    schedule. The vertical dashed line marks the EU ETS price.}
+    approximately $+1\%$ because emissions dominate the cost denominator.
+    The vertical dashed line marks \SI{80}{\EUR\per\tCOtwo}.}
   \label{fig:6_main}
 \end{figure}
 
@@ -777,20 +811,20 @@ regime-specific null and return to its mechanism in \cref{sec:2022}.
 %   distribution ($\sigma = 0.71\%$), all 10 seeds positive, $t = 13.9$.
 %
 % The five per-year companions belong in the supplement or as a
-% labelled block in the main text depending on the journal's figure
+% labelled block in the supplement or main text according to journal figure
 % budget. The captions below match a paper-grade level of detail.
 
 \Cref{fig:6_2021,fig:6_2022,fig:6_2023,fig:6_2024,fig:6_2025} decompose the
 headline number into the five individual years, each using the two-panel
 layout of \cref{fig:6_main} restricted to one year with the ten-seed mean
-overlaid at the EU ETS price. Read as a sequence they tell a coherent story:
+overlaid at the \SI{80}{\EUR\per\tCOtwo} reference value. Read as a sequence they tell a coherent story:
 2021 is the strongest year (all ten seeds positive, the widest headroom in a
 normal-price regime); 2022 is the crisis-year null; 2023 is a robustly
 positive recovery year; 2024 is positive in the seed mean despite an
 unusually unlucky default-seed realisation (\cref{sec:2024-outlier}); and
 2025 is the cleanest and most significant year, with the tightest seed
-distribution ($\sigma=0.71\%$) and all ten realisations positive. Depending
-on the venue's figure budget these five panels may sit in a supplement; the
+distribution ($\sigma=0.71\%$) and all ten realisations positive. For venues
+with tighter figure limits, these five panels may sit in a supplement; the
 captions are written to stand alone.
 
 \begin{figure}[htbp]
@@ -800,7 +834,7 @@ captions are written to stand alone.
     (Klaip\.eda Independence FSRU, single cargo realisation;
     10-seed sensitivity overlay at \SI{80}{\EUR\per\tCOtwo}). The blue curve
     traces aware-vs-lagged saving for the default cargo schedule
-    (seed~42) as the EU ETS price varies; the red marker at
+    (seed~42) as the carbon price varies; the red marker at
     \SI{80}{\EUR\per\tCOtwo} shows the 10-seed mean ($+4.57\%$, 95\% CI
     $[+3.22, +5.92]$, $p = 9.5 \times 10^{-5}$). The seed-42 trajectory
     ($+1.98\%$ at \SI{80}{\EUR\per\tCOtwo}) sits at the low end of the 2021
@@ -852,7 +886,7 @@ captions are written to stand alone.
     positive realisations spanning $+0.89\%$ to $+2.53\%$; only one
     cargo realisation (seed~7, $-1.35\%$) is negative. 2023 is the
     recovery year after the 2022 energy crisis; the result is
-    robustly positive at the EU ETS price and stable across most
+    robustly positive at the reference value and stable across most
     cargo realisations, supporting the post-crisis interpretation of
     composition awareness as a reliable lever once price regimes
     normalise.}
@@ -895,8 +929,8 @@ captions are written to stand alone.
     are positive (range $+1.91\%$ to $+4.07\%$), the standard
     deviation across seeds ($0.71\%$) is roughly half that of any
     other year, and the $t$-statistic exceeds 13. The narrowing
-    distribution suggests the carbon-pricing-driven lever has reached
-    a stable operational regime in the most recent year.}
+    distribution suggests the carbon-pricing-driven lever is least seed-sensitive
+    in the most recent simulated year.}
   \label{fig:6_2025}
 \end{figure}
 
@@ -1004,17 +1038,20 @@ $x(t)=x_{\text{in}}+(x_0-x_{\text{in}})\,e^{-(t-t_0)/\tau_{\text{mix}}}$, which
 front-loads the compositional change and is the more physically defensible
 model of a stirred storage tank under continuous inflow and outflow. Both
 kernels are convex combinations of the outgoing and incoming cargo and so
-preserve the mole-fraction simplex exactly. For each
-$(\tau_{\text{mix}},\text{kernel})$ cell we rerun the full ten-seed backtest at
-$p^{\text{co2}}=\SI{80}{\EUR\per\tCOtwo}$ and report the five-year-mean saving
-with its $95\%$ confidence interval (\cref{tab:mixing-sensitivity}).
+preserve the mole-fraction simplex exactly. The first-order kernel is
+implemented and unit-tested in the released code, but the full CSTR grid is not
+yet available in the manuscript artifacts. We therefore report only the
+completed linear-ramp sweep and treat the headline as conditional on the
+default tank-mixing dynamics.
 
 The completed linear-ramp sweep spans $+1.62\%$ to $+2.61\%$ across
 $\tau_{\text{mix}}=\SIrange{1}{10}{\day}$, with all confidence intervals
 strictly above zero. This supports the sign of the composition-aware saving
-under the default linear kernel, but the physically preferable CSTR kernel is
-still being computed and should be promoted to the primary robustness claim
-once complete. The upper end of the sweep marks the edge of physical
+under the default linear kernel. Under the default linear tank-mixing model,
+the five-year mean saving is $+2.50\%$. Because this transition model generates
+the information gap between the aware and lagged strategies, the result should
+be interpreted as conditional on the assumed mixing dynamics. The upper end of
+the sweep marks the edge of physical
 plausibility: as $\tau_{\text{mix}}$ approaches the
 $\approx\SI{12}{\day}$ inter-cargo interval the tank never settles between
 arrivals, so $\tau_{\text{mix}}=\SI{10}{\day}$ already represents
@@ -1024,23 +1061,22 @@ near-continuous transition.
   \centering
   \caption{Five-year-mean composition-aware saving versus the lagged baseline
     at \SI{80}{\EUR\per\tCOtwo}, as a function of the tank-mixing timescale
-    $\tau_{\text{mix}}$ and kernel ($n=50$ seed-year cells per completed entry,
-    $95\%$ Student's $t$ interval). Linear-ramp values are from the completed
-    cache in \texttt{data/processed/mixing\_sensitivity\_cells.parquet}. The
-    CSTR sweep was still running at manuscript-edit time and is intentionally
-    marked pending rather than interpolated.}
+    $\tau_{\text{mix}}$ under the completed linear-ramp kernel ($n=50$
+    seed-year cells per entry, $95\%$ Student's $t$ interval). The
+    first-order CSTR robustness grid is implemented in code but is not reported
+    here, so the headline should be read as conditional on the default mixing
+    model.}
   \label{tab:mixing-sensitivity}
-  \begin{tabular}{lcc}
+  \begin{tabular}{lc}
     \toprule
-    $\tau_{\text{mix}}$ (d) & Linear ramp & First-order (CSTR) \\
-                            & saving \% [95\% CI] & saving \% [95\% CI] \\
+    $\tau_{\text{mix}}$ (d) & Linear-ramp saving \% [95\% CI] \\
     \midrule
-    1  & $+1.62$ $[+1.08,+2.16]$            & pending \\
-    2  & $+1.71$ $[+1.16,+2.26]$            & pending \\
-    3  & $+2.12$ $[+1.56,+2.68]$            & pending \\
-    5  & $\mathbf{+2.51}$ $[+1.90,+3.12]$   & pending \\
-    7  & $+2.61$ $[+1.99,+3.22]$            & pending \\
-    10 & $+2.45$ $[+1.85,+3.04]$            & pending \\
+    1  & $+1.62$ $[+1.08,+2.16]$ \\
+    2  & $+1.71$ $[+1.16,+2.26]$ \\
+    3  & $+2.12$ $[+1.56,+2.68]$ \\
+    5  & $\mathbf{+2.51}$ $[+1.90,+3.12]$ \\
+    7  & $+2.61$ $[+1.99,+3.22]$ \\
+    10 & $+2.45$ $[+1.85,+3.04]$ \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -1077,13 +1113,15 @@ and the agent genuinely optimises against it: (i) a vertically integrated
 importer-supplier whose downstream gas sales are carbon-cost-adjusted, so that
 the carbon content of heavier cargoes is borne by the same balance sheet that
 sets dispatch; (ii) a forward policy regime in which end-use combustion of the
-delivered gas is priced---the EU ETS2 covering buildings and road transport
-from 2027, or a prospective import-carbon charge analogous to the CBAM extended
+delivered gas is priced---the EU ETS2 covering buildings, road transport, and
+additional sectors, fully operational from 2028, with upstream fuel suppliers
+as the regulated entities \citep{eu_ets2_commission_2026}, or a prospective
+import-carbon charge analogous to the CBAM extended
 to fossil gas---so that the carbon differential is passed back toward the point
 of regasification; and (iii) an operator applying an internal or shadow carbon
 price as an internal decarbonisation lever. The \SI{80}{\EUR\per\tCOtwo}
-reference value is chosen to coincide with the prevailing ETS allowance price
-for concreteness, but the substantive result is the parametric sweep of
+reference value is a sensitivity point, close to recent 2026 analyst-average
+EUA expectations \citep{reuters_eua_forecast_2026}, but the substantive result is the parametric sweep of
 \cref{fig:6_main}A: it reports the saving as a function of \emph{whatever}
 effective carbon price the agent faces, so a reader can locate their own regime
 on that axis rather than committing to ours. The upper sweep values
@@ -1136,13 +1174,19 @@ priced at EU ETS levels where it is large in absolute euros and scales
 directly with composition rather than through the thermodynamics. Carbon
 pricing thus hands the optimiser a new, materially sized cost component that
 the lagged baseline cannot model, and composition awareness becomes
-economically meaningful. Three observations corroborate this mechanism: the
-saving scales with carbon price up to the EU ETS level and then plateaus
-(\cref{fig:6_main}A); the temporal-arbitrage saving collapses from
-approximately $20\%$ to approximately $1\%$ once any carbon price pins the
-schedule (\cref{fig:6_main}B); and the per-window saving is concentrated in
-price--composition regimes rather than in methane variability alone
-(\cref{fig:sensitivity}).
+economically meaningful. Once emissions are priced, the carbon term becomes
+the dominant component of total cost. Part of the observed decline in
+percentage temporal-arbitrage value is therefore mechanical: the denominator
+increases even when the absolute electricity-arbitrage value changes little.
+    The present artifact set reports total realised cost and percentage saving;
+    separate electricity-cost and carbon-cost deltas should be generated before
+    making stronger schedule-collapse claims.
+Three observations corroborate this mechanism: the saving scales with carbon
+price up to the reference range and then plateaus (\cref{fig:6_main}A); the
+temporal-arbitrage percentage saving declines once the carbon term dominates
+the cost denominator (\cref{fig:6_main}B); and the per-window saving is
+concentrated in price--composition regimes rather than in methane variability
+alone (\cref{fig:sensitivity}).
 
 \subsection{2022: the energy-crisis null}
 \label{sec:2022}
@@ -1219,76 +1263,51 @@ number, as each year's result. The single-seed sweep \emph{curves} remain
 useful as illustrations of how the saving responds to carbon price, but
 should not be read as point predictions for a specific terminal-year.
 
-\subsection{Methodological warning: soft-physics surrogates fabricate composition savings}
+\subsection{The decision hazard, controlled: soft constraints can create the signal}
 \label{sec:methodological-warning}
 
-% --- DRAFT ---
-% Earlier versions of this pipeline used a more conventional PINN
-% architecture in which $W_{pump}$, $W_{total}$, $T_{out}$, and exergy
-% were all predicted by the network, with soft penalty losses
-% enforcing energy and mass balance. The 5-year aggregate
-% composition-aware saving from that pipeline was
-% $+4.7\%$, $+6.5\%$, $+3.8\%$ on 2021--2023 (mean across 5 seeds, std
-% $\approx 2\%$--$4\%$) -- ostensibly significant.
-%
-% Migrating to the physics-by-construction architecture in
-% \cref{sec:pinn} collapsed these numbers by an order of magnitude:
-% $+4.6\%$, $+0.9\%$, $+1.4\%$ across the same years with std
-% $\approx 0.2\%$--$0.5\%$ at zero carbon, indistinguishable from
-% zero. The $+2.50\%$ headline only emerges once the carbon-pricing
-% term in \cref{eq:dispatch} is included.
-%
-% The mechanism for the soft-physics inflation is the asymmetric error
-% structure between aware and blind strategies: the aware strategy
-% queries the surrogate at composition values that vary hour-to-hour,
-% while the blind strategy queries at a single fixed composition. Any
-% small bias in the surrogate's composition-dependence becomes a
-% systematic differential cost between the two strategies. Soft
-% physics losses (the standard PINN training recipe) leave residual
-% biases at the $\sim 1$-$5\%$ level that propagate directly into the
-% reported saving. Hard physics constraints in the surrogate
-% architecture eliminate the bias by construction.
-%
-% This finding is independent of the specific application: any
-% downstream optimisation that uses a PINN surrogate to differentiate
-% between strategies querying different parts of the input space is at
-% risk of mistaking surrogate noise for a real difference. The fix is
-% architectural, not training-procedural.
+The most transferable result of this study is a failure mode of
+surrogate-in-the-loop optimisation. The released pipeline now isolates it with a
+controlled experiment rather than leaving it as an incidental observation: two
+surrogates are trained on identical data, seeds, and optimisation budget---one
+with the conventional
+soft-physics recipe \citep{raissi2019physics}, predicting $W_{\text{pump}}$,
+$W_{\text{total}}$, $T_{\text{out}}$, and exergy jointly with soft energy- and
+mass-balance penalties, and one with the physics-by-construction architecture of
+\cref{sec:pinn}---and the identical ten-seed dispatch backtest is run with each at
+$p_{\text{co}_2}\in\{0, \SI{80}{\EUR\per\tCOtwo}\}$. The final numerical table is
+not included in the present artifact set, so we do not report a fabricated-saving
+magnitude here. The controlled comparison is instead used as a decision-fidelity
+diagnostic: a non-zero aware-versus-lagged saving under the soft surrogate at
+zero carbon, paired with a near-zero hard-surrogate saving, would identify
+composition-dependent surrogate residual structure rather than real process
+economics.
 
-A striking by-product of this study is a cautionary tale about surrogate
-design. An earlier version of our pipeline used the conventional soft-physics recipe
-\citep{raissi2019physics}---predicting $W_{\text{pump}}$, $W_{\text{total}}$,
-$T_{\text{out}}$, and exergy jointly with soft energy- and mass-balance
-penalties---and it reported composition-aware savings of roughly $+4.7\%$,
-$+6.5\%$, and $+3.8\%$ over 2021--2023 (five-seed means, $\sigma\approx
-2$--$4\%$), apparently significant and apparently present even without carbon
-pricing. Migrating to the physics-by-construction architecture of
-\cref{sec:pinn} collapsed those numbers by an order of magnitude: at zero
-carbon price the same years give savings indistinguishable from zero
-($\sigma\approx0.2$--$0.5\%$). The $+2.50\%$ headline only re-emerges once the
-carbon term is restored. In other words, the soft-physics surrogate had been
-fabricating a composition signal that does not exist at zero carbon price.
+The mechanism is an asymmetric error structure, and it is why aggregate fidelity
+metrics miss it. The aware strategy queries the surrogate at a composition that
+varies hour to hour, while the lagged strategy queries at a single fixed
+composition; any composition-dependent bias in a surrogate can therefore become a
+\emph{systematic} differential cost between the two strategies rather than
+averaging out. Such a bias can be negligible in held-out accuracy while still
+being comparable to the economic effect under study, and can survive directly
+into the reported saving. The hard-constrained
+architecture removes them by construction, because the cost-determining channel is
+tied to exact thermodynamics and depends on the network only through a single
+bounded scalar. This is distinct from the prediction-accuracy case for hard
+constraints made elsewhere
+\citep{krishnapriyan2021characterizing,chalapathi2024moe,chen2024kkt}: the bias
+here is invisible to accuracy and manifests only in the \emph{decision}.
 
-The mechanism is an asymmetric error structure. The aware strategy queries
-the surrogate at a composition that varies hour to hour, while a blind
-strategy queries at a single fixed composition; any composition-dependent
-bias in the surrogate therefore becomes a \emph{systematic} differential cost
-between the two strategies rather than averaging out. Soft physics losses
-leave residual biases at the approximately $1$--$5\%$ level---small in absolute fidelity
-terms, but exactly the size of the effect under study---which propagate
-directly into the reported saving. Hard physics constraints remove the bias
-by construction, because the cost-determining channel is tied to exact
-thermodynamics and depends on the network only through a single bounded
-scalar. The lesson generalises beyond LNG: any pipeline that uses a learned
-surrogate to compare decisions querying different regions of the input space
-is exposed to this hazard, and the remedy is architectural, not a matter of
-tuning the loss weights. A practical diagnostic is to compute the surrogate's
-cost difference between a time-varying composition trajectory and its
-window-mean composition, then compare that difference with the same calculation
-from the ground-truth simulator. If the surrogate-only difference exceeds the
-simulator difference by more than roughly $1$--$2\%$ of the simulator cost, the
-architecture is likely fabricating a composition signal and should not be used
-inside an optimiser without hard-constraint or on-trajectory validation.
+The hazard generalises to any pipeline that uses a learned surrogate to compare
+decisions querying different regions of the input space, so we provide a cheap
+pre-deployment diagnostic. For each surrogate, compute the cost difference between
+a time-varying composition trajectory and its window-mean composition, then
+compute the same difference from the ground-truth simulator; their discrepancy
+is a fabrication diagnostic. As a rule of thumb, if the
+surrogate-only difference exceeds the simulator difference by more than roughly
+$1$--$2\%$ of the simulator cost, the architecture is creating signal and must
+not be placed inside an optimiser without hard constraints or on-trajectory
+validation.
 
 \subsection{Limitations}
 \label{sec:limitations}
@@ -1349,7 +1368,7 @@ qualities is not claimed. A related and sharper concern is that the
 aware-versus-lagged gap is itself generated by our assumed tank-mixing
 transition rather than by composition awareness per se; we address the
 completed linear-kernel part of this directly in \cref{sec:mixing-robustness},
-with the CSTR kernel still pending. \textbf{Oracle foresight:} the aware
+while the first-order CSTR grid remains to be reported. \textbf{Oracle foresight:} the aware
 strategy knows the true blended composition over the full horizon, so the
 saving is an upper bound on deployable composition forecasting.
 \textbf{Steady-state plant model:} the
@@ -1362,33 +1381,41 @@ median absolute relative cost error of $1.54\times10^{-7}$ on the trajectory,
 but the HEOS backend itself is less
 accurate for heavy hydrocarbons near critical conditions
 \citep{bell2014pure}, and the surrogate inherits that. \textbf{Uncertainty:}
-we quantify cargo-schedule variance with 10 seeds but do not propagate
-property-model, weather, price-forecast, or demand uncertainty.
+the reported p-values quantify variability over the synthetic cargo-schedule
+generator only. They do not propagate market prices, demand, weather, terminal
+controls, property-model uncertainty, plant measurements, or cargo assay data.
+The results should therefore be interpreted as controlled simulation evidence
+for decision-fidelity effects rather than as an audited estimate of real
+terminal savings.
 
 % =========================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
-We asked whether knowing the composition of the LNG cargo helps an FSRU
-operator dispatch more cheaply, and found that the answer is conditional on
-carbon pricing. Coupling a physics-by-construction neural surrogate to a
+The transferable result of this study is a caution: a surrogate accurate enough
+to pass every fidelity check can still fabricate a decision signal when it is used
+to compare options that probe different regions of its input space, and the remedy
+is architectural rather than a matter of tuning loss weights. We frame this in a
+concrete question---whether knowing the LNG cargo composition helps an FSRU
+operator dispatch more cheaply---and found the answer conditional on carbon
+pricing. Coupling a physics-by-construction neural surrogate to a
 rolling-horizon dispatch over five years of Lithuanian day-ahead prices,
 composition-aware dispatch saves $+2.50\%$ ($95\%$~CI $[+2.01, +2.98]$,
-$p=3.5\times10^{-6}$, $n=10$ seeds) over a realistic lagged-composition baseline at the reference EU
-ETS price, but nothing measurable at zero carbon price. The benefit is
+$p=3.5\times10^{-6}$, $n=10$ seeds) over a realistic lagged-composition baseline at the
+\SI{80}{\EUR\per\tCOtwo} reference value, but nothing measurable at zero carbon price. The benefit is
 created by the carbon-cost differential between cargoes rather than by their
 thermodynamics, it is robust across four of five years, and it disappears
-only in the 2022 energy-crisis regime where price arbitrage dominates. Along
-the way we showed that the conventional soft-physics recipe fabricates a
-composition signal that vanishes under exact physics---a hazard for any
-surrogate-in-the-loop optimisation that compares decisions across different
-regions of the input space. The practical message for terminal operators is
-specific: composition-aware dispatch is a real but modest lever whose value
+only in the 2022 energy-crisis regime where price arbitrage dominates. The
+soft-vs-hard comparison implemented in the released pipeline tests whether a
+conventional soft-physics recipe creates a composition signal that vanishes
+under exact physics---a hazard for any surrogate-in-the-loop optimisation that
+compares decisions across different regions of the input space. The practical message for terminal operators is
+specific but conditional: composition-aware dispatch is a modest simulated lever whose value
 is unlocked by emissions pricing and is most dependable in normal-volatility
-markets. We also show that soft-physics surrogates can fabricate composition
-signals, and that the sign of the headline saving is robust to completed
+markets. The diagnostic code also tests whether soft-physics surrogates can
+create composition signals, and the sign of the headline saving is robust to completed
 linear tank-mixing sweeps over $\tau_{\text{mix}}=\SIrange{1}{10}{\day}$ while
-the CSTR-kernel run remains the key remaining robustness check. The
+the first-order CSTR grid remains the key remaining robustness check. The
 physics-by-construction surrogate is fast enough for this repeated optimisation
 loop: in the released benchmark it is approximately $\num{1.11e4}\times$ faster
 than serial CoolProp HEOS on the same sampled operating points. Extending the
