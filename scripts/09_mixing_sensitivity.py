@@ -459,6 +459,13 @@ def main() -> None:
     ap.add_argument("--self-check", action="store_true",
                     help="Validate the wiring (no model needed) and exit.")
     ap.add_argument("--out", default="results/tables/mixing_sensitivity.csv")
+    ap.add_argument(
+        "--flush-every", type=int, default=1,
+        help=(
+            "Write the resumable per-seed-year cache after this many completed "
+            "tasks. Default 1 is slower but safer on Windows/long runs."
+        ),
+    )
     args = ap.parse_args()
 
     if args.self_check:
@@ -497,7 +504,7 @@ def main() -> None:
     )
 
     global _SERIAL_BAR
-    flush_every = 10
+    flush_every = max(1, int(args.flush_every))
     since = 0
     if tasks and n_workers == 1:
         _SERIAL_BAR = tqdm(total=total_windows, desc="windows", unit="win", position=1)
