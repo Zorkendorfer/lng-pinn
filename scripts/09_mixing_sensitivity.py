@@ -355,9 +355,15 @@ def _saving_task(args):
     return its saving. Returns (tau, kernel, seed, year, saving_pct)."""
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
     tau, kernel, seed, year, carbon_price = args
-    arrivals, n_hours = load_arrivals(seed, year)
-    traj = build_blended_trajectory(arrivals, n_hours, tau, kernel)
-    val = float(run_backtest_saving(traj, seed, year, carbon_price))
+    try:
+        arrivals, n_hours = load_arrivals(seed, year)
+        traj = build_blended_trajectory(arrivals, n_hours, tau, kernel)
+        val = float(run_backtest_saving(traj, seed, year, carbon_price))
+    except Exception as exc:
+        raise RuntimeError(
+            f"mixing task failed: tau={tau:g}, kernel={kernel}, "
+            f"seed={seed}, year={year}, carbon_price={carbon_price:g}"
+        ) from exc
     return (tau, kernel, seed, year, val)
 
 
@@ -447,11 +453,11 @@ def main() -> None:
     ap.add_argument(
         "--max-tasks-per-child", type=int, default=8,
         help=(
-            "Recycle each worker process after this many cells. CoolProp leaks "
-            "C++ state and the per-process aux cache grows with every unique "
-            "blend composition, so without recycling memory climbs until the "
-            "Windows paging file is exhausted (WinError 1455) and the pool "
-            "wedges. 0 disables recycling."
+            "Restart the process pool after each worker has handled about this "
+            "many cells. This bounds per-process CoolProp/PINN aux memory without "
+            "using ProcessPoolExecutor's internal worker recycling, which can "
+            "stall after the first recycle wave on some Python/platform "
+            "combinations. 0 keeps one pool for the full run."
         ),
     )
     ap.add_argument("--no-resume", action="store_true",
@@ -545,22 +551,32 @@ def main() -> None:
         poller.start()
         pool_kwargs = dict(max_workers=n_workers, initializer=_init_worker, initargs=(q,))
         if args.max_tasks_per_child > 0:
-            pool_kwargs["max_tasks_per_child"] = args.max_tasks_per_child
+            batch_size = max(n_workers, n_workers * args.max_tasks_per_child)
+        else:
+            batch_size = len(tasks)
         broke = False
-        with ProcessPoolExecutor(**pool_kwargs) as ex:
-            futs = {ex.submit(_saving_task, t): t for t in tasks}
+        for i in range(0, len(tasks), batch_size):
+            batch = tasks[i : i + batch_size]
+            batch_no = i // batch_size + 1
+            n_batches = (len(tasks) + batch_size - 1) // batch_size
+            bar_cells.set_postfix_str(f"pool {batch_no}/{n_batches}", refresh=False)
             try:
-                for f in as_completed(futs):
-                    res = f.result()
-                    done[_cell_key(res[0], res[1], res[2], res[3])] = res[4]
-                    bar_cells.update(1)
-                    since += 1
-                    if since >= flush_every:
-                        _flush_cells_cache(done)
-                        since = 0
+                with ProcessPoolExecutor(**pool_kwargs) as ex:
+                    futs = {ex.submit(_saving_task, t): t for t in batch}
+                    for f in as_completed(futs):
+                        res = f.result()
+                        done[_cell_key(res[0], res[1], res[2], res[3])] = res[4]
+                        bar_cells.update(1)
+                        since += 1
+                        if since >= flush_every:
+                            _flush_cells_cache(done)
+                            since = 0
             except BrokenProcessPool:
                 broke = True
                 _flush_cells_cache(done)
+                break
+            _flush_cells_cache(done)
+            since = 0
         stop.set()
         poller.join(timeout=2)
         bar_win.update(_drain(final=True))  # flush any stragglers

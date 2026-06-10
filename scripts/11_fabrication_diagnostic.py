@@ -63,6 +63,8 @@ def main() -> None:
                     help="Evenly subsample this many windows (CoolProp cost).")
     ap.add_argument("--threshold-frac", type=float, default=0.02,
                     help="Flag windows whose |gap| exceeds this fraction of truth cost.")
+    ap.add_argument("--no-resume", action="store_true",
+                    help="Ignore existing per-window diagnostic output and recompute.")
     ap.add_argument("--out", default=str(RESULTS_DIR / "fabrication_diagnostic.csv"))
     args = ap.parse_args()
 
@@ -80,17 +82,30 @@ def main() -> None:
         idx = np.linspace(0, len(starts) - 1, args.max_windows).round().astype(int)
         starts = [starts[i] for i in sorted(set(idx))]
 
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    detail_path = RESULTS_DIR / f"fabrication_diagnostic_{args.surrogate}_seed{args.seed}.csv"
+
     rows = []
+    done_starts: set[int] = set()
+    if detail_path.exists() and not args.no_resume:
+        cached = pd.read_csv(detail_path)
+        if "start" in cached.columns:
+            cached = cached[cached["start"].isin(starts)].copy()
+            rows = cached.to_dict("records")
+            done_starts = {int(s) for s in cached["start"]}
+            print(f"  resuming from {detail_path}: {len(done_starts)}/{len(starts)} windows cached")
+
     from tqdm import tqdm
-    for start in tqdm(starts, desc=f"{args.surrogate} windows", unit="win"):
+    pending = [start for start in starts if start not in done_starts]
+    for start in tqdm(pending, desc=f"{args.surrogate} windows", unit="win"):
         window = ts.iloc[start:start + H]
         d = composition_fabrication_gap(model, scaler, window, m_dot, args.carbon_price)
         d["start"] = start
         rows.append(d)
+        pd.DataFrame(rows).sort_values("start").to_csv(detail_path, index=False)
 
     detail = pd.DataFrame(rows)
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    detail_path = RESULTS_DIR / f"fabrication_diagnostic_{args.surrogate}_seed{args.seed}.csv"
+    detail = detail[detail["start"].isin(starts)].sort_values("start").reset_index(drop=True)
     detail.to_csv(detail_path, index=False)
 
     gap_frac = detail["gap_frac_of_truth_cost"].to_numpy()
@@ -112,8 +127,17 @@ def main() -> None:
         "passed": bool(passed),
     }
     out = Path(args.out)
-    header = not out.exists()
-    pd.DataFrame([summary]).to_csv(out, mode="a", index=False, header=header)
+    summary_df = pd.DataFrame([summary])
+    if out.exists():
+        existing = pd.read_csv(out)
+        if {"surrogate", "seed", "carbon_price_eur_per_t"}.issubset(existing.columns):
+            keep = ~(
+                (existing["surrogate"] == args.surrogate)
+                & (existing["seed"] == args.seed)
+                & (existing["carbon_price_eur_per_t"] == args.carbon_price)
+            )
+            summary_df = pd.concat([existing.loc[keep], summary_df], ignore_index=True)
+    summary_df.to_csv(out, index=False)
 
     # Scatter: truth vs surrogate composition-sensitivity per window. A faithful
     # surrogate hugs the y=x line; a fabricating one departs from it.

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import CoolProp.CoolProp as CP
 
-from lng_pinn.thermo import get_state
+from lng_pinn.thermo import get_state, update_sendout_pt
 
 # Plant constants (Independence FSRU reference values)
 ETA_PUMP_BEP = 0.78        # peak isentropic pump efficiency (at BEP)
@@ -91,12 +91,12 @@ def simulate(
     h_after_pump = h_in + w_pump * mw            # J/mol
 
     # --- Target state at send-out conditions ---
-    state.update(CP.PT_INPUTS, P_out, T_SENDOUT)
+    update_sendout_pt(state, P_out, T_SENDOUT)
     h_out_target = state.hmolar()  # J/mol
 
     # --- ORV outlet: seawater approach temperature ---
     T_orv_out = min(T_sw - 3.0, T_SENDOUT)
-    state.update(CP.PT_INPUTS, P_out, T_orv_out)
+    update_sendout_pt(state, P_out, T_orv_out)
     h_orv_out = state.hmolar()   # J/mol
     s_orv_out = state.smolar()   # J/(mol*K)
     cp_orv = state.cpmass()      # J/(kg*K)

@@ -73,6 +73,35 @@ def mixture_state(x: tuple[float, ...], T: float, P: float) -> MixtureState:
     )
 
 
+def update_sendout_pt(state: Any, P: float, T: float) -> None:
+    """Update a CoolProp state at send-out PT with robust phase hints.
+
+    Some blended LNG compositions make HEOS' unconstrained PT flash choose an
+    invalid density root at send-out conditions. The physical plant state here
+    is the regasified send-out stream, so if the unconstrained flash fails we
+    retry with gas/supercritical gas phase hints before surfacing the original
+    CoolProp error.
+    """
+    try:
+        state.update(CP.PT_INPUTS, P, T)
+        return
+    except ValueError as first_error:
+        for phase in (
+            CP.iphase_gas,
+            CP.iphase_supercritical_gas,
+            CP.iphase_supercritical,
+        ):
+            try:
+                state.specify_phase(phase)
+                state.update(CP.PT_INPUTS, P, T)
+                return
+            except ValueError:
+                continue
+            finally:
+                state.unspecify_phase()
+        raise first_error
+
+
 def composition_aux(composition: tuple[float, ...]) -> tuple[float, float, float]:
     """Return (h_in J/kg, h_out J/kg, rho_in kg/m^3) for one LNG composition.
 
@@ -97,7 +126,7 @@ def composition_aux(composition: tuple[float, ...]) -> tuple[float, float, float
     state.update(CP.PQ_INPUTS, P_IN, 0.0)
     h_in = state.hmolar() / state.molar_mass()
     rho_in = state.rhomass()
-    state.update(CP.PT_INPUTS, P_OUT_DEFAULT, T_SENDOUT)
+    update_sendout_pt(state, P_OUT_DEFAULT, T_SENDOUT)
     h_out = state.hmolar() / state.molar_mass()
     result = (float(h_in), float(h_out), float(rho_in))
     _AUX_CACHE[key] = result

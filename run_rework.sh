@@ -31,8 +31,9 @@ CARBON_PRICE="${CARBON_PRICE:-80}"
 WORKERS="${WORKERS:-10}"
 VAL_FRAC="${VAL_FRAC:-0.05}"      # v1.5 E2 validation-sample fraction
 PRICES_AXIS="${PRICES_AXIS:-0 20 40 60 80 100 120 160}"
+FAB_WINDOWS="${FAB_WINDOWS:-12}"  # CoolProp-heavy windows per fabrication diagnostic
 
-echo "=== run_rework.sh phase=$PHASE  carbon_price=$CARBON_PRICE  workers=$WORKERS ==="
+echo "=== run_rework.sh phase=$PHASE  carbon_price=$CARBON_PRICE  workers=$WORKERS  fab_windows=$FAB_WINDOWS ==="
 
 # ---------------------------------------------------------------------------
 phase_tests() {
@@ -107,7 +108,8 @@ phase_fabrication() {
           --surrogate "$ARCH" \
           --model-path "$MODEL_FLAG" \
           --seed "$SEED" \
-          --carbon-price "$CARBON_PRICE"
+          --carbon-price "$CARBON_PRICE" \
+          --max-windows "$FAB_WINDOWS"
     done
   done
 }
@@ -189,6 +191,7 @@ Env vars:
   WORKERS=10                     outer-parallelism for 06/07
   VAL_FRAC=0.05                  v1.5 E2 validation-sample fraction
   PRICES_AXIS="0 20 40 60 80 100 120 160"  ensemble price grid
+  FAB_WINDOWS=12                 CoolProp-heavy windows per fabrication diagnostic
 
 Typical workflow:
   ./run_rework.sh tests          # 10 s — sanity check

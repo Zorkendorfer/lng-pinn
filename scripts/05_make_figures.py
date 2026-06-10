@@ -103,6 +103,73 @@ def build_yearly_summary(
     return yearly
 
 
+def _carbon_token(price: float) -> str:
+    return f"{price:g}".replace("-", "m").replace(".", "p")
+
+
+def build_volatility_table(
+    aware_df: pd.DataFrame | None,
+    lagged_df: pd.DataFrame | None,
+    ts_df: pd.DataFrame,
+    horizon_days: int,
+    carbon_price: float,
+) -> pd.DataFrame:
+    """Build the volatility-vs-saving table for Fig. 8.
+
+    Prefer the five-year default-seed true-cost cache when it exists. The generic
+    dispatch cache currently covers only the shorter default-dispatch artifact,
+    so using the seed cache keeps Fig. 8 aligned with the 2021--2025 paper
+    horizon while preserving the original per-window diagnostic shape.
+    """
+    token = _carbon_token(carbon_price)
+    seed = 42
+    aware_path = PROCESSED_DIR / f"seed_true_costs_hard_co2{token}_seed{seed}_aware.parquet"
+    lagged_path = PROCESSED_DIR / f"seed_true_costs_hard_co2{token}_seed{seed}_lagged.parquet"
+    if aware_path.exists() and lagged_path.exists():
+        aware_tc = pd.read_parquet(aware_path)
+        lagged_tc = pd.read_parquet(lagged_path)
+        aware_tc["time"] = pd.to_datetime(aware_tc["time"], utc=True)
+        lagged_tc["time"] = pd.to_datetime(lagged_tc["time"], utc=True)
+        aware_tc = aware_tc.set_index("time")["true_cost_eur"]
+        lagged_tc = lagged_tc.set_index("time")["true_cost_eur"]
+        common = aware_tc.index.intersection(lagged_tc.index)
+        horizon = f"{horizon_days}D"
+        saving = (lagged_tc.loc[common] - aware_tc.loc[common]).resample(horizon).sum()
+        lagged_cost = lagged_tc.loc[common].resample(horizon).sum()
+        price_vol = ts_df["price_eur_mwh"].resample(horizon).std()
+        diag_df = pd.concat(
+            [
+                price_vol.rename("price_volatility"),
+                saving.rename("saving_eur"),
+                (100.0 * saving / lagged_cost).rename("saving_pct"),
+            ],
+            axis=1,
+        ).dropna()
+        diag_df = diag_df.reset_index().rename(
+            columns={"index": "start_time", "time": "start_time"}
+        )
+        diag_df["year"] = pd.to_datetime(diag_df["start_time"], utc=True).dt.year
+        diag_df.to_csv(RESULTS_DIR / "volatility_vs_saving.csv", index=False)
+        return diag_df
+
+    if aware_df is None or lagged_df is None:
+        raise SystemExit(
+            "Fig. 8 requires either the five-year seed true-cost cache or loaded "
+            "dispatch/baseline tables. Run the hard co2=80 seed sensitivity first."
+        )
+
+    horizon = f"{horizon_days}D"
+    diag_saving = (lagged_df["cost_eur"] - aware_df["cost_eur"]).resample(horizon).sum()
+    diag_vol = ts_df["price_eur_mwh"].reindex(aware_df.index).resample(horizon).std()
+    diag_df = pd.DataFrame({
+        "price_volatility": diag_vol,
+        "saving_eur": diag_saving,
+    }).dropna()
+    diag_df["year"] = diag_df.index.year
+    diag_df.to_csv(RESULTS_DIR / "volatility_vs_saving.csv", index=False)
+    return diag_df
+
+
 def _eval_one_row(args: tuple) -> float | None:
     """Top-level helper so ProcessPoolExecutor can pickle it.
 
@@ -364,6 +431,11 @@ def main() -> None:
              "run with, else PINN and true costs won't be comparable. Default 0 "
              "reproduces v1.2 (electricity-only) accounting.",
     )
+    parser.add_argument(
+        "--only-fig8",
+        action="store_true",
+        help="Regenerate only volatility_vs_saving.csv and fig8_volatility_vs_saving.pdf.",
+    )
     args = parser.parse_args()
     resume = not args.no_resume
 
@@ -377,6 +449,17 @@ def main() -> None:
             "  NOTE: --carbon-price > 0 with --resume: existing true_costs_*.parquet "
             "caches may be electricity-only. Delete them or pass --no-resume to rebuild."
         )
+
+    ts_df = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
+    ts_df.index = pd.to_datetime(ts_df.index, utc=True)
+
+    if args.only_fig8:
+        diag_df = build_volatility_table(
+            None, None, ts_df, args.horizon_days, args.carbon_price
+        )
+        fig_volatility_vs_saving(diag_df)
+        print("fig8_volatility_vs_saving.pdf written")
+        return
 
     def _load(name: str) -> pd.DataFrame:
         path = RESULTS_DIR / f"{name}.parquet"
@@ -406,9 +489,6 @@ def main() -> None:
         else horizon_df.copy()
     )
     blind_df    = horizon_df  # keep for backward-compat with existing figure functions
-    ts_df = pd.read_parquet(PROCESSED_DIR / "timeseries.parquet")
-    ts_df.index = pd.to_datetime(ts_df.index, utc=True)
-
     export_csv_tables()
     build_yearly_summary(aware_df, blind_df, annual_df, constant_df)
     print("yearly_summary.csv written (PINN costs)")
@@ -447,17 +527,11 @@ def main() -> None:
     fig_load_shift_heatmap(aware_df, blind_df, ts_df)
     print("fig3_load_shift.pdf written")
 
-    # v1.4 D — 2022 diagnostic: per-window price volatility vs aware-vs-lagged
-    # saving, coloured by year. Explains why the crisis year's saving is weak.
-    horizon = f"{args.horizon_days}D"
-    diag_saving = (lagged_df["cost_eur"] - aware_df["cost_eur"]).resample(horizon).sum()
-    diag_vol = ts_df["price_eur_mwh"].reindex(aware_df.index).resample(horizon).std()
-    diag_df = pd.DataFrame({
-        "price_volatility": diag_vol,
-        "saving_eur": diag_saving,
-    }).dropna()
-    diag_df["year"] = diag_df.index.year
-    diag_df.to_csv(RESULTS_DIR / "volatility_vs_saving.csv", index=False)
+    # v1.4 D — price-volatility diagnostic. Prefer the full five-year seed
+    # ensemble if available; otherwise fall back to the older per-window cache.
+    diag_df = build_volatility_table(
+        aware_df, lagged_df, ts_df, args.horizon_days, args.carbon_price
+    )
     fig_volatility_vs_saving(diag_df)
     print("fig8_volatility_vs_saving.pdf written")
 

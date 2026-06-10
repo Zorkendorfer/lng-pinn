@@ -134,22 +134,87 @@ def _plot(summary: pd.DataFrame, out: Path) -> None:
         print(f"figure skipped: {exc}")
         return
 
+    styles = {
+        "lagged": {
+            "color": "#1f77b4",
+            "linestyle": "-",
+            "marker": "o",
+            "label": "Hard vs lagged",
+            "zorder": 3,
+        },
+        "horizon": {
+            "color": "#d62728",
+            "linestyle": "--",
+            "marker": "s",
+            "label": "Hard vs horizon",
+            "zorder": 4,
+        },
+    }
+    baseline_order = ["lagged", "horizon"]
+
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(6.2, 4.0))
-    for (surrogate, baseline), g in summary.groupby(["surrogate", "baseline"], sort=True):
+    fig, (ax, gap_ax) = plt.subplots(
+        2,
+        1,
+        figsize=(6.2, 5.0),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3.2, 1.0], "hspace": 0.08},
+    )
+    grouped = {
+        (surrogate, baseline): g
+        for (surrogate, baseline), g in summary.groupby(["surrogate", "baseline"], sort=True)
+    }
+    for baseline in baseline_order:
+        g = grouped.get(("hard", baseline))
+        if g is None:
+            continue
         g = g.sort_values("carbon_price_eur_per_t")
         x = g["carbon_price_eur_per_t"].to_numpy(dtype=float)
         y = g["mean_saving_pct"].to_numpy(dtype=float)
         lo = g["ci95_lo_pct"].to_numpy(dtype=float)
         hi = g["ci95_hi_pct"].to_numpy(dtype=float)
-        label = f"{surrogate} vs {baseline}"
-        ax.plot(x, y, marker="o", label=label)
-        ax.fill_between(x, lo, hi, alpha=0.12)
+        style = styles[baseline]
+        ax.plot(
+            x,
+            y,
+            color=style["color"],
+            linestyle=style["linestyle"],
+            marker=style["marker"],
+            label=style["label"],
+            zorder=style["zorder"],
+        )
+        ax.fill_between(x, lo, hi, color=style["color"], alpha=0.10, zorder=1)
+
+    lagged = grouped.get(("hard", "lagged"))
+    horizon = grouped.get(("hard", "horizon"))
+    if lagged is not None and horizon is not None:
+        gap = (
+            lagged.sort_values("carbon_price_eur_per_t")[
+                ["carbon_price_eur_per_t", "mean_saving_pct"]
+            ]
+            .merge(
+                horizon.sort_values("carbon_price_eur_per_t")[
+                    ["carbon_price_eur_per_t", "mean_saving_pct"]
+                ],
+                on="carbon_price_eur_per_t",
+                suffixes=("_lagged", "_horizon"),
+            )
+        )
+        x = gap["carbon_price_eur_per_t"].to_numpy(dtype=float)
+        y = (
+            gap["mean_saving_pct_lagged"].to_numpy(dtype=float)
+            - gap["mean_saving_pct_horizon"].to_numpy(dtype=float)
+        )
+        gap_ax.axhline(0.0, color="0.35", lw=0.8)
+        gap_ax.plot(x, y, color="0.2", marker="D", ms=3.5, lw=1.0)
+        gap_ax.set_ylabel("Lagged -\nhorizon\n(pp)")
+        gap_ax.set_ylim(min(-0.02, float(y.min()) - 0.005), max(0.03, float(y.max()) + 0.005))
+
     ax.axhline(0.0, color="0.35", lw=0.8)
-    ax.set_xlabel("CO2 price [EUR/tCO2]")
     ax.set_ylabel("Aware saving [%]")
     ax.set_title("Seed-ensemble carbon-price sweep")
     ax.legend(frameon=False, fontsize=8)
+    gap_ax.set_xlabel("CO2 price [EUR/tCO2]")
     fig.tight_layout()
     fig.savefig(out)
     plt.close(fig)

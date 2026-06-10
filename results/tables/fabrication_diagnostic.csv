@@ -1,0 +1,11 @@
+surrogate,seed,carbon_price_eur_per_t,n_windows,mean_abs_gap_frac,median_gap_frac,frac_windows_flagged,mean_surrogate_delta_eur,mean_truth_delta_eur,threshold_frac,passed
+hard,42,80.0,60,0.0,-0.0,0.0,-61.06,-61.28,0.02,True
+hard,0,80.0,60,0.0,-0.0,0.0,-81.23,-81.22,0.02,True
+hard,1,80.0,60,0.0,-0.0,0.0,-52.29,-52.17,0.02,True
+hard,7,80.0,60,0.0,-0.0,0.0,-36.23,-35.96,0.02,True
+hard,13,80.0,60,0.0,-0.0,0.0,-58.22,-58.32,0.02,True
+soft,42,80.0,60,0.0,-0.0,0.0,-61.51,-61.28,0.02,True
+soft,0,80.0,60,0.0,-0.0,0.0,-81.46,-81.22,0.02,True
+soft,1,80.0,60,0.0,0.0,0.0,-52.25,-52.17,0.02,True
+soft,7,80.0,60,0.0,-0.0,0.0,-36.1,-35.96,0.02,True
+soft,13,80.0,60,0.0,-0.0,0.0,-58.25,-58.32,0.02,True
