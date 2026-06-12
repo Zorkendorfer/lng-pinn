@@ -1,15 +1,16 @@
 {
-  "created_utc": "2026-06-09T19:20:01.738419+00:00",
-  "git_sha": "9e522642f35fd407b8966414a8be985d21fd8ae7",
+  "created_utc": "2026-06-12T00:02:28.353344+00:00",
+  "git_sha": "004534e29278f954ac52fc9e63eac93d34ec3d67",
   "git_branch": "rework/code-side",
-  "git_status_short": "M .claude/settings.local.json\n M results/tables/seed_sensitivity.csv\n M results/tables/seed_sensitivity_summary.csv\n M results/tables/seed_significance.csv\n M run_rework.sh\n M scripts/09_mixing_sensitivity.py\n M scripts/11_fabrication_diagnostic.py\n M src/lng_pinn/plant.py\n M src/lng_pinn/thermo.py\n?? code_rework_plan.md\n?? fabrication.log\n?? results/figures/fig_carbon_ensemble.pdf\n?? results/figures/fig_fabrication_hard.pdf\n?? results/figures/fig_fabrication_soft.pdf\n?? results/tables/carbon_ensemble.csv\n?? results/tables/fabrication_diagnostic.csv\n?? results/tables/fabrication_diagnostic_hard_seed0.csv\n?? results/tables/fabrication_diagnostic_hard_seed1.csv\n?? results/tables/fabrication_diagnostic_hard_seed13.csv\n?? results/tables/fabrication_diagnostic_hard_seed42.csv\n?? results/tables/fabrication_diagnostic_hard_seed7.csv\n?? results/tables/fabrication_diagnostic_soft_seed0.csv\n?? results/tables/fabrication_diagnostic_soft_seed1.csv\n?? results/tables/fabrication_diagnostic_soft_seed13.csv\n?? results/tables/fabrication_diagnostic_soft_seed42.csv\n?? results/tables/fabrication_diagnostic_soft_seed7.csv\n?? results/tables/mixing_sensitivity.csv\n?? results/tables/mixing_table3.csv\n?? results/tables/phase2_validation_composition.csv\n?? results/tables/seed_sensitivity_hard_co20.csv\n?? results/tables/seed_sensitivity_hard_co2100.csv\n?? results/tables/seed_sensitivity_hard_co2120.csv\n?? results/tables/seed_sensitivity_hard_co2160.csv\n?? results/tables/seed_sensitivity_hard_co220.csv\n?? results/tables/seed_sensitivity_hard_co240.csv\n?? results/tables/seed_sensitivity_hard_co260.csv\n?? results/tables/seed_sensitivity_hard_co280.csv\n?? results/tables/seed_sensitivity_soft_co20.csv\n?? results/tables/seed_sensitivity_soft_co280.csv\n?? results/tables/seed_sensitivity_summary_hard_co20.csv\n?? results/tables/seed_sensitivity_summary_hard_co2100.csv\n?? results/tables/seed_sensitivity_summary_hard_co2120.csv\n?? results/tables/seed_sensitivity_summary_hard_co2160.csv\n?? results/tables/seed_sensitivity_summary_hard_co220.csv\n?? results/tables/seed_sensitivity_summary_hard_co240.csv\n?? results/tables/seed_sensitivity_summary_hard_co260.csv\n?? results/tables/seed_sensitivity_summary_hard_co280.csv\n?? results/tables/seed_sensitivity_summary_soft_co20.csv\n?? results/tables/seed_sensitivity_summary_soft_co280.csv\n?? results/tables/seed_significance_hard_co20.csv\n?? results/tables/seed_significance_hard_co2100.csv\n?? results/tables/seed_significance_hard_co2120.csv\n?? results/tables/seed_significance_hard_co2160.csv\n?? results/tables/seed_significance_hard_co220.csv\n?? results/tables/seed_significance_hard_co240.csv\n?? results/tables/seed_significance_hard_co260.csv\n?? results/tables/seed_significance_hard_co280.csv\n?? results/tables/seed_significance_soft_co20.csv\n?? results/tables/seed_significance_soft_co280.csv\n?? results/tables/soft_vs_hard.csv\n?? results/tables/soft_vs_hard_contrast.csv\n?? results/tables/surrogate_eval_soft.parquet\n?? run_rework_overnight.sh",
+  "git_status_short": "M .claude/settings.local.json\n M paper/main.tex\n M paper/refs.bib\n M paper/seed_supplement.tex\n M results/figures/fig_carbon_ensemble.pdf\n M results/figures/fig_fabrication_hard.pdf\n M results/figures/fig_fabrication_soft.pdf\n M results/tables/carbon_ensemble.csv\n M results/tables/fabrication_diagnostic.csv\n M results/tables/fabrication_diagnostic_hard_seed0.csv\n M results/tables/fabrication_diagnostic_hard_seed1.csv\n M results/tables/fabrication_diagnostic_hard_seed13.csv\n M results/tables/fabrication_diagnostic_hard_seed42.csv\n M results/tables/fabrication_diagnostic_hard_seed7.csv\n M results/tables/fabrication_diagnostic_soft_seed0.csv\n M results/tables/fabrication_diagnostic_soft_seed1.csv\n M results/tables/fabrication_diagnostic_soft_seed13.csv\n M results/tables/fabrication_diagnostic_soft_seed42.csv\n M results/tables/fabrication_diagnostic_soft_seed7.csv\n M results/tables/mixing_sensitivity.csv\n M results/tables/mixing_table3.csv\n M results/tables/paper_numbers_summary.csv\n M results/tables/phase2_validation_composition.csv\n M results/tables/seed_sensitivity.csv\n M results/tables/seed_sensitivity_hard_co20.csv\n M results/tables/seed_sensitivity_hard_co2100.csv\n M results/tables/seed_sensitivity_hard_co2120.csv\n M results/tables/seed_sensitivity_hard_co2160.csv\n M results/tables/seed_sensitivity_hard_co220.csv\n M results/tables/seed_sensitivity_hard_co240.csv\n M results/tables/seed_sensitivity_hard_co260.csv\n M results/tables/seed_sensitivity_hard_co280.csv\n M results/tables/seed_sensitivity_soft_co20.csv\n M results/tables/seed_sensitivity_soft_co280.csv\n M results/tables/seed_sensitivity_summary.csv\n M results/tables/seed_sensitivity_summary_hard_co20.csv\n M results/tables/seed_sensitivity_summary_hard_co2100.csv\n M results/tables/seed_sensitivity_summary_hard_co2120.csv\n M results/tables/seed_sensitivity_summary_hard_co2160.csv\n M results/tables/seed_sensitivity_summary_hard_co220.csv\n M results/tables/seed_sensitivity_summary_hard_co240.csv\n M results/tables/seed_sensitivity_summary_hard_co260.csv\n M results/tables/seed_sensitivity_summary_hard_co280.csv\n M results/tables/seed_sensitivity_summary_soft_co20.csv\n M results/tables/seed_sensitivity_summary_soft_co280.csv\n M results/tables/seed_significance.csv\n M results/tables/seed_significance_hard_co20.csv\n M results/tables/seed_significance_hard_co2100.csv\n M results/tables/seed_significance_hard_co2120.csv\n M results/tables/seed_significance_hard_co2160.csv\n M results/tables/seed_significance_hard_co220.csv\n M results/tables/seed_significance_hard_co240.csv\n M results/tables/seed_significance_hard_co260.csv\n M results/tables/seed_significance_hard_co280.csv\n M results/tables/seed_significance_soft_co20.csv\n M results/tables/seed_significance_soft_co280.csv\n M results/tables/soft_vs_hard.csv\n M results/tables/soft_vs_hard_contrast.csv\n M run_rework.sh\n M scripts/02_build_dataset.py\n M scripts/06_seed_sensitivity.py\n M scripts/09_mixing_sensitivity.py\n M scripts/09_paper_numbers.py\n M scripts/11_fabrication_diagnostic.py\n M scripts/12_soft_vs_hard.py\n M scripts/13_carbon_ensemble.py\n M scripts/14_mixing_table.py\n M scripts/15_run_manifest.py\n M src/lng_pinn/dataset.py\n?? code_rework_plan.md\n?? fabrication.log\n?? fix_strategy.md\n?? paper/mixing_table.tex\n?? paper/paper_macros.tex\n?? paper/seed_significance_table.tex\n?? paper/surrogate_eval_table.tex\n?? referee_report_lng_pinn.md\n?? results/tables/paper_numbers.json\n?? scripts/16_cost_decomposition.py\n?? scripts/17_tout_audit.py\n?? scripts/18_audit_artifacts.py",
   "python": "3.11.7 (main, Dec 15 2023, 12:09:56) [Clang 14.0.6 ]",
   "platform": "macOS-26.5-arm64-arm-64bit",
   "machine": "arm64",
   "processor": "arm",
   "commands": [
+    "uv run python scripts/18_audit_artifacts.py --timeseries-only --strict",
     "uv run python scripts/03_train_pinn.py --arch soft --lambda-e 1.0 --lambda-p 1.0 --out results/models/pinn_soft.pt --fresh",
-    "uv run python scripts/09_mixing_sensitivity.py --carbon-price 80 --workers 10",
+    "uv run python scripts/09_mixing_sensitivity.py --carbon-price 80 --no-resume --workers 10",
     "uv run python scripts/14_mixing_table.py --strict",
     "uv run python scripts/06_seed_sensitivity.py --carbon-price 0 --surrogate hard --workers 6",
     "uv run python scripts/06_seed_sensitivity.py --carbon-price 80 --surrogate hard --workers 6",
@@ -18,7 +19,11 @@
     "uv run python scripts/12_soft_vs_hard.py --strict",
     "uv run python scripts/13_carbon_ensemble.py --prices 0 20 40 60 80 100 120 160 --strict",
     "uv run python scripts/11_fabrication_diagnostic.py --surrogate hard",
-    "uv run python scripts/11_fabrication_diagnostic.py --surrogate soft --model-path results/models/pinn_soft.pt"
+    "uv run python scripts/11_fabrication_diagnostic.py --surrogate soft --model-path results/models/pinn_soft.pt",
+    "uv run python scripts/16_cost_decomposition.py --surrogate hard --carbon-price 80 --strict",
+    "uv run python scripts/17_tout_audit.py",
+    "uv run python scripts/09_paper_numbers.py --write --refresh-validation",
+    "uv run python scripts/18_audit_artifacts.py --strict"
   ],
   "artifacts": [
     {
@@ -37,38 +42,71 @@
       "path": "results/tables/mixing_table3.csv",
       "exists": true,
       "bytes": 368,
-      "mtime_utc": "2026-06-09T15:32:16.394413+00:00"
+      "mtime_utc": "2026-06-11T18:18:10.440124+00:00"
     },
     {
       "path": "results/tables/soft_vs_hard.csv",
       "exists": true,
       "bytes": 545,
-      "mtime_utc": "2026-06-08T18:32:38.871058+00:00"
+      "mtime_utc": "2026-06-11T19:56:05.636965+00:00"
     },
     {
       "path": "results/tables/soft_vs_hard_contrast.csv",
       "exists": true,
-      "bytes": 143,
-      "mtime_utc": "2026-06-08T18:32:38.871192+00:00"
+      "bytes": 142,
+      "mtime_utc": "2026-06-11T19:56:05.637329+00:00"
     },
     {
       "path": "results/tables/carbon_ensemble.csv",
       "exists": true,
-      "bytes": 988,
-      "mtime_utc": "2026-06-09T19:20:01.255656+00:00"
+      "bytes": 1663,
+      "mtime_utc": "2026-06-12T00:02:27.545890+00:00"
+    },
+    {
+      "path": "results/tables/cost_decomposition.csv",
+      "exists": false
+    },
+    {
+      "path": "results/tables/cost_decomposition_delta.csv",
+      "exists": false
+    },
+    {
+      "path": "results/tables/cost_decomposition_summary.csv",
+      "exists": false
     },
     {
       "path": "results/tables/fabrication_diagnostic.csv",
       "exists": true,
-      "bytes": 693,
-      "mtime_utc": "2026-06-08T18:32:38.866103+00:00"
+      "bytes": 696,
+      "mtime_utc": "2026-06-11T20:45:22.372105+00:00"
+    },
+    {
+      "path": "results/tables/paper_numbers.json",
+      "exists": true,
+      "bytes": 4659,
+      "mtime_utc": "2026-06-11T13:49:01.702025+00:00"
     },
     {
       "path": "results/tables/phase2_validation_composition.csv",
       "exists": true,
-      "bytes": 126965,
-      "mtime_utc": "2026-06-09T19:19:59.681252+00:00"
+      "bytes": 253605,
+      "mtime_utc": "2026-06-12T00:02:25.508364+00:00"
+    },
+    {
+      "path": "results/tables/tout_audit.csv",
+      "exists": false
+    },
+    {
+      "path": "paper/paper_macros.tex",
+      "exists": true,
+      "bytes": 2847,
+      "mtime_utc": "2026-06-11T13:49:01.703233+00:00"
     }
   ],
-  "missing_artifacts": []
+  "missing_artifacts": [
+    "results/tables/cost_decomposition.csv",
+    "results/tables/cost_decomposition_delta.csv",
+    "results/tables/cost_decomposition_summary.csv",
+    "results/tables/tout_audit.csv"
+  ]
 }

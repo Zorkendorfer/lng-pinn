@@ -121,7 +121,8 @@ def _seed_true_cost_done_path(seed: int, strategy: str) -> Path:
 
 def _seed_true_cost_partial_path(seed: int, strategy: str) -> Path:
     """In-progress per-row true-cost partial, flushed every K completions."""
-    return PROCESSED_DIR / f"{_cache_prefix('seed_true_costs')}_seed{seed}_{strategy}_inprogress.parquet"
+    name = f"{_cache_prefix('seed_true_costs')}_seed{seed}_{strategy}_inprogress.parquet"
+    return PROCESSED_DIR / name
 
 
 def _flush_true_cost_partial(done: dict[int, float], path: Path) -> None:
@@ -547,24 +548,45 @@ def _run_backtest(
     ckpt_every: int = 20,
     carbon_price_eur_per_t: float = 0.0,
     tqdm_position: int = 0,
+    volume_matched: bool = False,
+    demand_band: float = 0.001,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     # Lazy torch-pulling imports — see the module-top comment.
     from lng_pinn.baseline import optimize_blind_horizon, optimize_blind_lagged
-    from lng_pinn.dispatch import M_DOT_MAX, optimize
+    from lng_pinn.dispatch import M_DOT_MAX, M_DOT_MIN, optimize
 
     H = HORIZON_DAYS * 24
     step = 24
     starts = list(range(0, len(ts) - H + 1, step))
     demand_kg = M_DOT_MAX * 0.6 * H * 3600
 
+    # Volume-matched mode (TASK V1): the floor-only demand constraint binds per
+    # 7-day plan, but only the first 24 h commit, so realised annual send-out
+    # drifts between strategies (the aware optimiser perpetually defers volume
+    # under a carbon-dominated bill). Per-plan equality would NOT fix this —
+    # a plan can back-load and still deliver exactly D over 168 h. Instead we
+    # carry a rolling volume debt: each window's demand is the contract-to-date
+    # shortfall, with a narrow band as the upper bound so every strategy
+    # realises the same annual volume up to the band width.
+    contract_rate_kg_per_h = M_DOT_MAX * 0.6 * 3600.0
+    min_total_kg = M_DOT_MIN * 3600.0 * H
+    max_total_kg = M_DOT_MAX * 3600.0 * H
+
     records_by_strategy: dict[str, list[dict[str, object]]] = {s: [] for s in STRATEGIES}
     inv = {s: 0.85 for s in STRATEGIES}
+    delivered = {s: 0.0 for s in STRATEGIES}
     resume_start = 0
 
     if resume:
         loaded = _load_seed_partial(seed)
         if loaded is not None:
             records_by_strategy, inv, resume_start = loaded
+            # Committed volume is recoverable from the cached records, so the
+            # volume-debt state needs no extra checkpoint field.
+            delivered = {
+                s: 3600.0 * sum(float(r["m_dot"]) for r in records_by_strategy[s])
+                for s in STRATEGIES
+            }
             n_recs = next(iter(records_by_strategy.values()), [])
             print(
                 f"  seed={seed}: resuming with {len(n_recs)} hours/strategy cached; "
@@ -588,16 +610,31 @@ def _run_backtest(
         lagged_composition = ts[COMP_COLS].iloc[start]
         n = min(step, len(window))
 
+        if volume_matched:
+            target_cum_kg = contract_rate_kg_per_h * float(start + H)
+            demand_by_s: dict[str, float] = {}
+            ub_by_s: dict[str, float | None] = {}
+            for s in STRATEGIES:
+                raw = target_cum_kg - delivered[s]
+                d = min(max(raw, min_total_kg), max_total_kg)
+                demand_by_s[s] = d
+                ub_by_s[s] = min(max_total_kg, d * (1.0 + demand_band))
+        else:
+            demand_by_s = {s: demand_kg for s in STRATEGIES}
+            ub_by_s = {s: None for s in STRATEGIES}
+
         cp = carbon_price_eur_per_t
         a_sched = optimize(  # type: ignore[arg-type]
-            window, model, scaler, demand_kg, inv["aware"], carbon_price_eur_per_t=cp,
+            window, model, scaler, demand_by_s["aware"], inv["aware"],
+            carbon_price_eur_per_t=cp, demand_ub_kg=ub_by_s["aware"],
         )
         l_sched = optimize_blind_lagged(  # type: ignore[arg-type]
-            window, model, scaler, demand_kg, lagged_composition, inv["lagged"],
-            carbon_price_eur_per_t=cp,
+            window, model, scaler, demand_by_s["lagged"], lagged_composition,
+            inv["lagged"], carbon_price_eur_per_t=cp, demand_ub_kg=ub_by_s["lagged"],
         )
         h_sched = optimize_blind_horizon(  # type: ignore[arg-type]
-            window, model, scaler, demand_kg, inv["horizon"], carbon_price_eur_per_t=cp,
+            window, model, scaler, demand_by_s["horizon"], inv["horizon"],
+            carbon_price_eur_per_t=cp, demand_ub_kg=ub_by_s["horizon"],
         )
 
         for t, row in enumerate(window.iloc[:n].itertuples()):
@@ -623,6 +660,9 @@ def _run_backtest(
         inv["aware"]   = float(a_sched.tank_level[n])
         inv["lagged"]  = float(l_sched.tank_level[n])
         inv["horizon"] = float(h_sched.tank_level[n])
+
+        for s, sched in (("aware", a_sched), ("lagged", l_sched), ("horizon", h_sched)):
+            delivered[s] += 3600.0 * sum(float(v) for v in sched.m_dot[:n])
 
         last_completed = start + step
         flush_counter += 1
@@ -698,6 +738,8 @@ def _process_one_seed(
     blend_days: float,
     slot: int = 0,
     validation_sample_frac: float = 1.0,
+    volume_matched: bool = False,
+    demand_band: float = 0.001,
 ) -> list[dict]:
     """Self-contained worker: dispatch + Phase-2 CoolProp re-eval for one seed.
 
@@ -730,6 +772,7 @@ def _process_one_seed(
         aware_df, lagged_df, horizon_df = _run_backtest(
             ts, model, scaler, seed=seed, resume=resume, ckpt_every=ckpt_every,
             carbon_price_eur_per_t=carbon_price, tqdm_position=pos,
+            volume_matched=volume_matched, demand_band=demand_band,
         )
         _save_seed_result(aware_df, lagged_df, horizon_df, seed)
         _clear_seed_partial(seed)
@@ -848,9 +891,31 @@ def main() -> None:
             "are logged to results/tables/phase2_validation_composition.csv."
         ),
     )
+    parser.add_argument(
+        "--volume-matched",
+        action="store_true",
+        help=(
+            "TASK V1: pin realised delivered volume via rolling volume-debt "
+            "accounting (each window's demand is the contract-to-date shortfall) "
+            "plus a narrow upper band on total send-out, so every strategy "
+            "realises the same annual volume. Appends '_volmatch' to the "
+            "surrogate label, so caches and result CSVs never collide with "
+            "floor-constraint runs."
+        ),
+    )
+    parser.add_argument(
+        "--demand-band", type=float, default=0.001,
+        help=(
+            "Relative width of the volume-matched demand band (default 0.001 = "
+            "0.1%%): per window, total send-out is constrained to "
+            "[shortfall, shortfall*(1+band)]. Only used with --volume-matched."
+        ),
+    )
     args = parser.parse_args()
     resume = not args.no_resume
     surrogate = _surrogate_label(args.model_path, args.surrogate)
+    if args.volume_matched:
+        surrogate = f"{surrogate}_volmatch"
     seeds = [int(s) for s in args.seeds]
     composition_label = (
         f"cargo_{Path(args.composition_csv).stem}" if args.composition_csv else None
@@ -888,6 +953,7 @@ def main() -> None:
                     inner_workers, args.model_path, surrogate, run_tag,
                     args.composition_csv, args.blend_days, i % n_workers,
                     args.validation_sample_frac,
+                    args.volume_matched, args.demand_band,
                 ): int(seed)
                 for i, seed in enumerate(seeds)
             }
@@ -939,6 +1005,8 @@ def main() -> None:
                     ts, model, scaler, seed=seed, resume=resume,
                     ckpt_every=args.ckpt_every,
                     carbon_price_eur_per_t=args.carbon_price,
+                    volume_matched=args.volume_matched,
+                    demand_band=args.demand_band,
                 )
                 _save_seed_result(aware_df, lagged_df, horizon_df, seed)
                 _clear_seed_partial(seed)
@@ -1038,9 +1106,15 @@ def main() -> None:
     print(f"Overall saving vs horizon: {h_totals.mean():.2f}% ± {h_totals.std():.2f}%")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    results_df.to_csv(RESULTS_DIR / "seed_sensitivity.csv", index=False)
-    summary.to_csv(RESULTS_DIR / "seed_sensitivity_summary.csv", index=False)
-    significance.to_csv(RESULTS_DIR / "seed_significance.csv", index=False)
+    if args.volume_matched:
+        # Volume-matched runs are a robustness variant: keep them out of the
+        # untagged canonical files, which feed the headline tables and the
+        # seed supplement. Only the tagged copies are written.
+        print("volume-matched run: skipping untagged canonical CSVs")
+    else:
+        results_df.to_csv(RESULTS_DIR / "seed_sensitivity.csv", index=False)
+        summary.to_csv(RESULTS_DIR / "seed_sensitivity_summary.csv", index=False)
+        significance.to_csv(RESULTS_DIR / "seed_significance.csv", index=False)
     tagged_results = RESULTS_DIR / f"seed_sensitivity_{run_tag}.csv"
     tagged_summary = RESULTS_DIR / f"seed_sensitivity_summary_{run_tag}.csv"
     tagged_significance = RESULTS_DIR / f"seed_significance_{run_tag}.csv"
@@ -1048,8 +1122,7 @@ def main() -> None:
     summary.to_csv(tagged_summary, index=False)
     significance.to_csv(tagged_significance, index=False)
     print(
-        "Saved seed_sensitivity.csv, seed_sensitivity_summary.csv, seed_significance.csv "
-        f"and tagged copies {tagged_results.name}, {tagged_summary.name}, "
+        f"Saved tagged copies {tagged_results.name}, {tagged_summary.name}, "
         f"{tagged_significance.name}"
     )
 
@@ -1088,12 +1161,26 @@ def _build_significance_table(results_df: pd.DataFrame) -> pd.DataFrame:
 
 def _ttest_row(x: "np.ndarray", baseline: str, scope: str, stats: object) -> dict:
     """One-sample t-test summary dict for saving array ``x`` vs 0."""
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
     n = int(len(x))
     mean = float(np.mean(x))
     std = float(np.std(x, ddof=1)) if n > 1 else 0.0
     se = std / np.sqrt(n) if n > 1 else 0.0
     t = mean / se if se > 0 else float("nan")
-    p = float(2 * stats.t.sf(abs(t), df=n - 1)) if (n > 1 and se > 0) else float("nan")  # type: ignore[attr-defined]
+    p = (
+        float(2 * stats.t.sf(abs(t), df=n - 1))  # type: ignore[attr-defined]
+        if (n > 1 and se > 0)
+        else float("nan")
+    )
+    try:
+        wilcoxon_p = (
+            float(stats.wilcoxon(x, zero_method="wilcox", alternative="two-sided").pvalue)
+            if n > 0 and not np.allclose(x, 0.0)
+            else float("nan")
+        )
+    except ValueError:
+        wilcoxon_p = float("nan")
     return {
         "baseline": baseline,
         "scope": scope,
@@ -1105,6 +1192,7 @@ def _ttest_row(x: "np.ndarray", baseline: str, scope: str, stats: object) -> dic
         "ci95_hi_pct": round(mean + 1.96 * se, 4),
         "t_stat": round(t, 3),
         "p_two_sided": p,
+        "wilcoxon_p_two_sided": wilcoxon_p,
     }
 
 

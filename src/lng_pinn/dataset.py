@@ -353,7 +353,23 @@ def build_timeseries(
     prices = load_da_prices(start, end, zone=zone)
     weather = pull_weather(start, end, lat=lat, lon=lon)
 
-    # Align weather to price index (resample/reindex to hourly UTC)
+    # Force a uniform hourly UTC index. ENTSO-E switched several bidding zones
+    # (incl. LT) to 15-minute settlement resolution during 2025, so a raw price
+    # index mixes 60-min and 15-min steps — which silently inflates the affected
+    # year's row count (~1.75x for LT 2025) and breaks the dispatch's assumption
+    # of one decision per hour. Resample to hourly means before anything joins to
+    # this index so every downstream window/demand/cost is on a consistent grid.
+    start_ts = pd.Timestamp(start, tz="UTC")
+    end_ts = pd.Timestamp(end, tz="UTC")
+    hourly_index = pd.date_range(start_ts, end_ts, freq="1h", inclusive="left")
+    if not prices.index.is_unique:
+        prices = prices[~prices.index.duplicated(keep="first")]
+    prices.index = pd.to_datetime(prices.index, utc=True)
+    prices = prices.resample("1h").mean()
+    prices = prices.reindex(hourly_index)
+    prices = prices.dropna(subset=["price_eur_mwh"])
+
+    # Align weather to the (now hourly) price index.
     idx = prices.index
     weather = weather.reindex(idx, method="nearest", tolerance="1h")
 

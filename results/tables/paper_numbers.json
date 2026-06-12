@@ -1,0 +1,306 @@
+{
+  "bench_coolprop_ms_per_point": {
+    "display": "128",
+    "value": 127.7318258319865
+  },
+  "bench_machine": {
+    "display": "macOS-26.5-arm64-arm-64bit",
+    "value": "macOS-26.5-arm64-arm-64bit"
+  },
+  "bench_pinn_ms_per_point": {
+    "display": "0.0112",
+    "value": 0.0111745000467635
+  },
+  "benchmark_coolprop_median_s": {
+    "display": "707.58",
+    "value": 707.580782
+  },
+  "benchmark_speedup_x": {
+    "display": "1.1e+04",
+    "value": 11062.9
+  },
+  "benchmark_surrogate_median_s": {
+    "display": "0.06396",
+    "value": 0.06396
+  },
+  "decomp_carbon_fraction_of_saving": {
+    "display": "1.00",
+    "value": 1.004256142415073
+  },
+  "decomp_carbon_share_pct": {
+    "display": "100",
+    "value": 100.4256142415073
+  },
+  "decomp_co2_intensity_saving_pct": {
+    "display": "+0.050",
+    "value": 0.0502700572585359
+  },
+  "decomp_delivered_mass_delta_pct": {
+    "display": "-2.550",
+    "value": -2.5500550080503595
+  },
+  "decomp_mean_co2_saving_t": {
+    "display": "108485.8",
+    "value": 108485.8148860411
+  },
+  "decomp_per_kg_ci95_hi_pct": {
+    "display": "+0.037",
+    "value": 0.0368765159345449
+  },
+  "decomp_per_kg_ci95_lo_pct": {
+    "display": "+0.028",
+    "value": 0.0284294229675541
+  },
+  "decomp_saving_per_kg_pct": {
+    "display": "+0.033",
+    "value": 0.0326529694510495
+  },
+  "ensemble_ci95_hi_at_0_pct": {
+    "display": "+0.03",
+    "value": 0.0257
+  },
+  "ensemble_ci95_hi_at_160_pct": {
+    "display": "+4.25",
+    "value": 4.2454
+  },
+  "ensemble_ci95_hi_at_80_pct": {
+    "display": "+3.11",
+    "value": 3.1111
+  },
+  "ensemble_ci95_lo_at_0_pct": {
+    "display": "-0.01",
+    "value": -0.0092
+  },
+  "ensemble_ci95_lo_at_160_pct": {
+    "display": "+2.88",
+    "value": 2.883
+  },
+  "ensemble_ci95_lo_at_80_pct": {
+    "display": "+2.05",
+    "value": 2.0524
+  },
+  "ensemble_saving_at_0_pct": {
+    "display": "+0.01",
+    "value": 0.0082
+  },
+  "ensemble_saving_at_160_pct": {
+    "display": "+3.56",
+    "value": 3.5642
+  },
+  "ensemble_saving_at_80_pct": {
+    "display": "+2.58",
+    "value": 2.5818
+  },
+  "fab_hard_flagged_windows": {
+    "display": "0",
+    "value": 0
+  },
+  "fab_seed_count": {
+    "display": "5",
+    "value": 5
+  },
+  "fab_soft_flagged_windows": {
+    "display": "0",
+    "value": 0
+  },
+  "fab_windows_per_seed": {
+    "display": "12",
+    "value": 12
+  },
+  "fidelity_max_abs_rel_error": {
+    "display": "9.27e-05",
+    "value": 9.270122604654318e-05
+  },
+  "fidelity_median_abs_rel_error": {
+    "display": "1.54e-07",
+    "value": 1.5414747223108094e-07
+  },
+  "fidelity_p95_abs_rel_error": {
+    "display": "2.59e-06",
+    "value": 2.5931447872662438e-06
+  },
+  "headline_ci95_hi_pct": {
+    "display": "+3.11",
+    "value": 3.1111
+  },
+  "headline_ci95_lo_pct": {
+    "display": "+2.05",
+    "value": 2.0524
+  },
+  "headline_p_two_sided": {
+    "display": "p<10^{-5}",
+    "value": 5.2037286741032e-06
+  },
+  "headline_saving_vs_lagged_pct": {
+    "display": "+2.58",
+    "value": 2.5818
+  },
+  "headline_seed_n": {
+    "display": "10",
+    "value": 10
+  },
+  "headline_wilcoxon_p_two_sided": {
+    "display": "p=0.002",
+    "value": 0.001953125
+  },
+  "mixing_cstr_max_pct": {
+    "display": "+2.61",
+    "value": 2.6085811641050727
+  },
+  "mixing_cstr_min_pct": {
+    "display": "+2.03",
+    "value": 2.034057929577547
+  },
+  "mixing_linear_max_pct": {
+    "display": "+2.77",
+    "value": 2.767875068193548
+  },
+  "mixing_linear_min_pct": {
+    "display": "+1.60",
+    "value": 1.6018557545247856
+  },
+  "mixing_min_ci_lo_pct": {
+    "display": "+1.08",
+    "value": 1.0803607264266644
+  },
+  "mixing_wilcoxon_max_p": {
+    "display": "p=0.002",
+    "value": 0.001953125
+  },
+  "record_count_market_hours": {
+    "display": "43,824",
+    "value": 43824
+  },
+  "single_seed_constant_flow_saving_at_0_pct": {
+    "display": "+21.89",
+    "value": 21.89251265457336
+  },
+  "single_seed_constant_flow_saving_at_80_pct": {
+    "display": "+1.48",
+    "value": 1.4810390759640755
+  },
+  "single_seed_sweep_mean_saving_at_0_pct": {
+    "display": "+0.03",
+    "value": 0.029035206177646555
+  },
+  "single_seed_sweep_mean_saving_at_80_pct": {
+    "display": "+1.40",
+    "value": 1.3954848031191518
+  },
+  "svh_contrast_at_0_pp": {
+    "display": "+0.0041",
+    "value": 0.0041
+  },
+  "svh_contrast_at_80_pp": {
+    "display": "+0.0022",
+    "value": 0.0022
+  },
+  "svh_hard_at_0_ci95_hi_pct": {
+    "display": "+0.026",
+    "value": 0.0257
+  },
+  "svh_hard_at_0_ci95_lo_pct": {
+    "display": "-0.009",
+    "value": -0.0092
+  },
+  "svh_hard_at_0_mean_pct": {
+    "display": "+0.008",
+    "value": 0.0082
+  },
+  "svh_hard_at_80_ci95_hi_pct": {
+    "display": "+3.111",
+    "value": 3.1111
+  },
+  "svh_hard_at_80_ci95_lo_pct": {
+    "display": "+2.052",
+    "value": 2.0524
+  },
+  "svh_hard_at_80_mean_pct": {
+    "display": "+2.582",
+    "value": 2.5818
+  },
+  "svh_max_abs_contrast_pp": {
+    "display": "0.0041",
+    "value": 0.0041
+  },
+  "svh_soft_at_0_ci95_hi_pct": {
+    "display": "+0.029",
+    "value": 0.0285
+  },
+  "svh_soft_at_0_ci95_lo_pct": {
+    "display": "-0.004",
+    "value": -0.0039
+  },
+  "svh_soft_at_0_mean_pct": {
+    "display": "+0.012",
+    "value": 0.0123
+  },
+  "svh_soft_at_80_ci95_hi_pct": {
+    "display": "+3.113",
+    "value": 3.1132
+  },
+  "svh_soft_at_80_ci95_lo_pct": {
+    "display": "+2.055",
+    "value": 2.0548
+  },
+  "svh_soft_at_80_mean_pct": {
+    "display": "+2.584",
+    "value": 2.584
+  },
+  "tout_degenerate_setpoint_channel": {
+    "display": "False",
+    "value": false
+  },
+  "tout_train_span_K": {
+    "display": "0.602",
+    "value": 0.6018810047864349
+  },
+  "tout_train_std_K": {
+    "display": "0.103",
+    "value": 0.1028740637235119
+  },
+  "volmatch_ci95_hi_pct": {
+    "display": "+0.090",
+    "value": 0.09
+  },
+  "volmatch_ci95_lo_pct": {
+    "display": "+0.044",
+    "value": 0.044
+  },
+  "volmatch_delivered_mass_delta_pct": {
+    "display": "+0.003",
+    "value": 0.0032225183375306
+  },
+  "volmatch_max_abs_year_mass_delta_pct": {
+    "display": "0.13",
+    "value": 0.1312819629499627
+  },
+  "volmatch_p_two_sided": {
+    "display": "p=0.00029",
+    "value": 0.0002921898075016
+  },
+  "volmatch_saving_pct": {
+    "display": "+0.067",
+    "value": 0.067
+  },
+  "volmatch_saving_per_kg_pct": {
+    "display": "+0.070",
+    "value": 0.0702130474396007
+  },
+  "volmatch_seed_n": {
+    "display": "10",
+    "value": 10
+  },
+  "volmatch_wilcoxon_p_two_sided": {
+    "display": "p=0.002",
+    "value": 0.001953125
+  },
+  "w_total_mae_kwh_per_kg": {
+    "display": "2.34e-06",
+    "value": 2.341435219932464e-06
+  },
+  "w_total_r2": {
+    "display": "0.999993",
+    "value": 0.9999933008569332
+  }
+}

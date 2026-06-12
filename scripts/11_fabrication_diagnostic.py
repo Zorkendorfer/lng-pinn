@@ -5,13 +5,13 @@
 Runs the composition-fabrication diagnostic (lng_pinn.diagnostics) over the
 rolling-horizon backtest windows for a given surrogate and reports, from code,
 whether the surrogate invents composition-dependent cost the CoolProp simulator
-does not have. A faithful hard-physics surrogate PASSES (gap ~ 0); a soft-physics
-surrogate is expected to FAIL.
+does not have. Large surrogate-vs-truth gaps indicate a decision artifact;
+near-zero gaps are a null result for both hard and soft surrogates.
 
     # hard surrogate (current checkpoint)
     uv run python scripts/11_fabrication_diagnostic.py --surrogate hard
 
-    # soft surrogate, once scripts/03 can train one (rework plan item 2)
+    # soft surrogate, once scripts/03 has trained one
     uv run python scripts/11_fabrication_diagnostic.py --surrogate soft \
         --model-path results/models/pinn_soft.pt
 

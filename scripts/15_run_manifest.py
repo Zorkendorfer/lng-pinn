@@ -19,8 +19,14 @@ DEFAULT_EXPECTED = [
     "results/tables/soft_vs_hard.csv",
     "results/tables/soft_vs_hard_contrast.csv",
     "results/tables/carbon_ensemble.csv",
+    "results/tables/cost_decomposition.csv",
+    "results/tables/cost_decomposition_delta.csv",
+    "results/tables/cost_decomposition_summary.csv",
     "results/tables/fabrication_diagnostic.csv",
+    "results/tables/paper_numbers.json",
     "results/tables/phase2_validation_composition.csv",
+    "results/tables/tout_audit.csv",
+    "paper/paper_macros.tex",
 ]
 
 
@@ -47,17 +53,46 @@ def _file_entry(path: str) -> dict[str, object]:
 def _commands() -> list[str]:
     prices = "0 20 40 60 80 100 120 160"
     return [
-        "uv run python scripts/03_train_pinn.py --arch soft --lambda-e 1.0 --lambda-p 1.0 --out results/models/pinn_soft.pt --fresh",
-        "uv run python scripts/09_mixing_sensitivity.py --carbon-price 80 --workers 10",
+        "uv run python scripts/18_audit_artifacts.py --timeseries-only --strict",
+        (
+            "uv run python scripts/03_train_pinn.py --arch soft --lambda-e 1.0 "
+            "--lambda-p 1.0 --out results/models/pinn_soft.pt --fresh"
+        ),
+        (
+            "uv run python scripts/09_mixing_sensitivity.py --carbon-price 80 "
+            "--no-resume --workers 10"
+        ),
         "uv run python scripts/14_mixing_table.py --strict",
-        "uv run python scripts/06_seed_sensitivity.py --carbon-price 0 --surrogate hard --workers 6",
-        "uv run python scripts/06_seed_sensitivity.py --carbon-price 80 --surrogate hard --workers 6",
-        "uv run python scripts/06_seed_sensitivity.py --carbon-price 0 --surrogate soft --model-path results/models/pinn_soft.pt --workers 6",
-        "uv run python scripts/06_seed_sensitivity.py --carbon-price 80 --surrogate soft --model-path results/models/pinn_soft.pt --workers 6",
+        (
+            "uv run python scripts/06_seed_sensitivity.py --carbon-price 0 "
+            "--surrogate hard --workers 6"
+        ),
+        (
+            "uv run python scripts/06_seed_sensitivity.py --carbon-price 80 "
+            "--surrogate hard --workers 6"
+        ),
+        (
+            "uv run python scripts/06_seed_sensitivity.py --carbon-price 0 "
+            "--surrogate soft --model-path results/models/pinn_soft.pt --workers 6"
+        ),
+        (
+            "uv run python scripts/06_seed_sensitivity.py --carbon-price 80 "
+            "--surrogate soft --model-path results/models/pinn_soft.pt --workers 6"
+        ),
         "uv run python scripts/12_soft_vs_hard.py --strict",
         "uv run python scripts/13_carbon_ensemble.py --prices " + prices + " --strict",
         "uv run python scripts/11_fabrication_diagnostic.py --surrogate hard",
-        "uv run python scripts/11_fabrication_diagnostic.py --surrogate soft --model-path results/models/pinn_soft.pt",
+        (
+            "uv run python scripts/11_fabrication_diagnostic.py --surrogate soft "
+            "--model-path results/models/pinn_soft.pt"
+        ),
+        (
+            "uv run python scripts/16_cost_decomposition.py --surrogate hard "
+            "--carbon-price 80 --strict"
+        ),
+        "uv run python scripts/17_tout_audit.py",
+        "uv run python scripts/09_paper_numbers.py --write --refresh-validation",
+        "uv run python scripts/18_audit_artifacts.py --strict",
     ]
 
 

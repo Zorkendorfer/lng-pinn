@@ -1,0 +1,2 @@
+channel,train_n,train_mean_K,train_std_K,train_min_K,train_max_K,train_span_K,eval_mae_K,eval_rmse_K,eval_r2,mae_over_train_std,degenerate_setpoint_channel
+T_out,20000,278.0991254529781,0.10287406372351196,277.54811899521354,278.15,0.6018810047864349,6.309406307991594e-05,9.81287521426566e-05,0.9999984795592608,0.0006133136069115517,False

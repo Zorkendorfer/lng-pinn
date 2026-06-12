@@ -191,10 +191,12 @@ def main() -> None:
     ]
     if {"hard", "soft"}.issubset(set(zero["surrogate"])):
         means = dict(zip(zero["surrogate"], zero["mean_saving_pct"]))
+        gap = float(means["soft"] - means["hard"])
         print(
             "\nZero-carbon check: "
             f"hard={means['hard']:.4f}%  soft={means['soft']:.4f}% "
-            "(soft should carry the fabricated signal; hard should be near zero)."
+            f"soft-hard={gap:+.4f} pp "
+            "(large gaps would indicate a surrogate artifact; near-zero is a null check)."
         )
     else:
         print("\nZero-carbon check skipped: hard and soft co2=0 tagged files are both required.")

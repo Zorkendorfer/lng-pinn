@@ -8,9 +8,9 @@ The headline aware-vs-lagged saving is generated *entirely* by how the in-tank
 composition transitions after a cargo arrival. The paper default is a linear
 blend over tau_mix = 5 d. This script reruns the existing 10-seed backtest for a
 grid of (tau_mix, kernel) and writes results/tables/mixing_sensitivity.csv with
-the 5-year-mean saving and 95% t-CI per cell, matching the n=50 seed-year
-convention used for the headline number (so the (tau=5, linear) cell reproduces
-+2.50 [+2.01, +2.99] by construction).
+the 5-year-mean saving and 95% t-CI per cell. The aggregation is seed-first:
+each seed is collapsed to its five-year mean before the t-test, so n is the
+number of cargo-schedule seeds, not the number of seed-year cells.
 
 WIRING (now done). The two `ADAPT:` hooks are wired to the project's own cargo
 schedule + dispatch:
@@ -319,32 +319,68 @@ def run_backtest_saving(comp_traj: np.ndarray, seed: int, year: int,
 # --------------------------------------------------------------------------- #
 # Sweep + aggregation                                                          #
 # --------------------------------------------------------------------------- #
-def _aggregate(tau_days, kernel, vals) -> dict:
-    """The n=50 seed-year aggregation (unchanged): mean, SE, t vs 0, 95% t-CI."""
-    a = np.asarray(vals, dtype=float)
-    n = a.size
-    mean = a.mean()
-    se = a.std(ddof=1) / np.sqrt(n)
-    t = mean / se if se > 0 else np.inf
-    p = 2 * stats.t.sf(abs(t), df=n - 1)
-    lo, hi = stats.t.interval(0.95, df=n - 1, loc=mean, scale=se)
-    return dict(tau_days=tau_days, kernel=kernel, n=n, mean_pct=mean,
-                se_pct=se, ci_low=lo, ci_high=hi, t=t, p=p)
+def _aggregate(tau_days, kernel, records) -> dict:
+    """Seed-first aggregation: mean, SE, t/Wilcoxon vs 0, 95% t-CI."""
+    df = pd.DataFrame(records)
+    if df.empty:
+        return {}
+    df = df[np.isfinite(df["saving_pct"].astype(float))]
+    seed_means = df.groupby("seed")["saving_pct"].mean().to_numpy(dtype=float)
+    seed_means = seed_means[np.isfinite(seed_means)]
+    n = int(seed_means.size)
+    n_cells = int(len(df))
+    mean = float(seed_means.mean()) if n else float("nan")
+    std = float(seed_means.std(ddof=1)) if n > 1 else 0.0
+    se = std / np.sqrt(n) if n > 1 else 0.0
+    t = mean / se if se > 0 else float("nan")
+    p = float(2 * stats.t.sf(abs(t), df=n - 1)) if (n > 1 and se > 0) else float("nan")
+    if n > 1 and se > 0:
+        lo, hi = stats.t.interval(0.95, df=n - 1, loc=mean, scale=se)
+    else:
+        lo, hi = mean, mean
+    try:
+        wilcoxon_p = (
+            float(stats.wilcoxon(seed_means, zero_method="wilcox").pvalue)
+            if n > 0 and not np.allclose(seed_means, 0.0)
+            else float("nan")
+        )
+    except ValueError:
+        wilcoxon_p = float("nan")
+    return dict(
+        tau_days=tau_days,
+        kernel=kernel,
+        n=n,
+        n_seed_year_cells=n_cells,
+        mean_pct=mean,
+        std_pct=std,
+        se_pct=se,
+        ci_low=lo,
+        ci_high=hi,
+        t=t,
+        p=p,
+        wilcoxon_p_two_sided=wilcoxon_p,
+    )
 
 
 def cell(tau_days, kernel, seeds, years, carbon_price) -> dict:
-    """One (tau, kernel) cell: collect the seed-year savings, return stats.
+    """One (tau, kernel) cell: collect seed-year savings, return seed-first stats.
 
     Kept as the reference serial implementation; main() uses a cached,
     optionally parallel task loop that feeds the identical vals into
     `_aggregate`."""
-    vals = []
+    records = []
     for seed in seeds:
         for year in years:
             arrivals, n_hours = load_arrivals(seed, year)
             traj = build_blended_trajectory(arrivals, n_hours, tau_days, kernel)
-            vals.append(run_backtest_saving(traj, seed, year, carbon_price))
-    return _aggregate(tau_days, kernel, vals)
+            records.append(
+                {
+                    "seed": seed,
+                    "year": year,
+                    "saving_pct": run_backtest_saving(traj, seed, year, carbon_price),
+                }
+            )
+    return _aggregate(tau_days, kernel, records)
 
 
 # --------------------------------------------------------------------------- #
@@ -595,14 +631,18 @@ def main() -> None:
     rows = []
     for k in args.kernels:
         for tau in args.tau_grid:
-            vals = [
-                done[_cell_key(tau, k, seed, year)]
+            records = [
+                {
+                    "seed": seed,
+                    "year": year,
+                    "saving_pct": done[_cell_key(tau, k, seed, year)],
+                }
                 for seed in args.seeds
                 for year in args.years
                 if _cell_key(tau, k, seed, year) in done
             ]
-            if vals:
-                rows.append(_aggregate(tau, k, vals))
+            if records:
+                rows.append(_aggregate(tau, k, records))
     df = pd.DataFrame(rows).sort_values(["kernel", "tau_days"])
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.out, index=False)

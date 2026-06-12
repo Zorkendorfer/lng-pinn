@@ -29,6 +29,11 @@ def main() -> None:
              "set is zone-independent and is only rebuilt for LT.",
     )
     parser.add_argument("--dry-run", action="store_true", help="N=1000, skip timeseries build")
+    parser.add_argument(
+        "--timeseries-only",
+        action="store_true",
+        help="Skip the CoolProp training set and rebuild only data/processed/timeseries.parquet.",
+    )
     args = parser.parse_args()
 
     try:
@@ -40,7 +45,9 @@ def main() -> None:
     print(f"git_sha={git_sha}  N={N}  seed={args.seed}  zone={args.zone}  dry_run={args.dry_run}")
 
     # --- Training set (zone-independent; only build for the default LT run) ---
-    if args.zone == "LT":
+    if args.timeseries_only:
+        print("timeseries-only: skipping training-set rebuild.")
+    elif args.zone == "LT":
         t0 = time.perf_counter()
         df = build_training_set(N=N, seed=args.seed, workers=args.workers)
         elapsed = time.perf_counter() - t0

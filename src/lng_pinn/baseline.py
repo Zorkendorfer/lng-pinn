@@ -31,10 +31,14 @@ def optimize_blind_horizon(
     demand_kg: float,
     inv0: float = 0.5,
     carbon_price_eur_per_t: float = 0.0,
+    demand_ub_kg: float | None = None,
 ) -> Schedule:
     """Run dispatch with composition fixed to the horizon mean."""
     blind_df = _with_fixed_composition(horizon_df, horizon_df[COMP_COLS].mean())
-    return optimize(blind_df, model, scaler, demand_kg, inv0, carbon_price_eur_per_t)
+    return optimize(
+        blind_df, model, scaler, demand_kg, inv0, carbon_price_eur_per_t,
+        demand_ub_kg=demand_ub_kg,
+    )
 
 
 def optimize_blind_annual(
@@ -98,6 +102,7 @@ def optimize_blind_lagged(
     lagged_composition: pd.Series,
     inv0: float = 0.5,
     carbon_price_eur_per_t: float = 0.0,
+    demand_ub_kg: float | None = None,
 ) -> Schedule:
     """Run dispatch with composition fixed to the value at the start of the window.
 
@@ -105,7 +110,10 @@ def optimize_blind_lagged(
     and held constant for the horizon, without knowing how it will evolve.
     """
     blind_df = _with_fixed_composition(horizon_df, lagged_composition)
-    return optimize(blind_df, model, scaler, demand_kg, inv0, carbon_price_eur_per_t)
+    return optimize(
+        blind_df, model, scaler, demand_kg, inv0, carbon_price_eur_per_t,
+        demand_ub_kg=demand_ub_kg,
+    )
 
 
 def optimize_blind(

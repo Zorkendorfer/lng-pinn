@@ -131,6 +131,7 @@ def optimize(
     inv0: float = 0.5,
     carbon_price_eur_per_t: float = 0.0,
     cargo_frac_cumulative: np.ndarray | None = None,
+    demand_ub_kg: float | None = None,
 ) -> Schedule:
     """Run dispatch optimisation over horizon_df.
 
@@ -152,6 +153,15 @@ def optimize(
             default None there are no mid-horizon arrivals and behaviour is
             bit-identical to v1.3 (the rolling drivers inject cargo between
             windows instead).
+        demand_ub_kg:
+            Optional upper bound on total send-out over the horizon (kg).
+            Used by the volume-matched backtest mode to pin delivered volume
+            to a narrow band around the contract shortfall instead of the
+            default floor-only constraint. Keep it a band (e.g. 1.001x the
+            floor) rather than strict equality: the one-hot LP relaxation may
+            mix two adjacent flow levels in one hour to land inside the band,
+            which is operationally a flow between levels. With the default
+            None, behaviour is bit-identical to the floor-only model.
     """
     T = len(horizon_df)
     flow_levels = np.linspace(M_DOT_MIN, M_DOT_MAX, N_FLOW_LEVELS)
@@ -174,6 +184,12 @@ def optimize(
     lb[:T] = 1.0
     ub[:T] = 1.0
     lb[T] = demand_kg
+    if demand_ub_kg is not None:
+        if demand_ub_kg < demand_kg:
+            raise ValueError(
+                f"demand_ub_kg ({demand_ub_kg}) must be >= demand_kg ({demand_kg})"
+            )
+        ub[T] = demand_ub_kg
 
     # Inventory bounds: tank level after each hour must stay in [TANK_MIN, TANK_MAX].
     #   level(t) = inv0 + cargo_frac_cumulative(t) - cumOut(t)/TANK_CAP

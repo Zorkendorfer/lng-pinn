@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 RESULTS_DIR = Path("results/tables")
 FIG_DIR = Path("results/figures")
@@ -106,6 +107,16 @@ def _summarise(df: pd.DataFrame) -> pd.DataFrame:
             mean = float(np.mean(vals))
             std = float(np.std(vals, ddof=1)) if n > 1 else 0.0
             se = std / math.sqrt(n) if n > 1 else 0.0
+            t_stat = mean / se if se > 0 else float("nan")
+            p = float(2 * stats.t.sf(abs(t_stat), df=n - 1)) if n > 1 and se > 0 else float("nan")
+            try:
+                wilcoxon_p = (
+                    float(stats.wilcoxon(vals, zero_method="wilcox").pvalue)
+                    if n > 0 and not np.allclose(vals, 0.0)
+                    else float("nan")
+                )
+            except ValueError:
+                wilcoxon_p = float("nan")
             rows.append(
                 {
                     "surrogate": surrogate,
@@ -117,6 +128,9 @@ def _summarise(df: pd.DataFrame) -> pd.DataFrame:
                     "se_pct": round(se, 4),
                     "ci95_lo_pct": round(mean - 1.96 * se, 4),
                     "ci95_hi_pct": round(mean + 1.96 * se, 4),
+                    "t_stat": round(t_stat, 3),
+                    "p_two_sided": p,
+                    "wilcoxon_p_two_sided": wilcoxon_p,
                 }
             )
     return pd.DataFrame(rows).sort_values(
